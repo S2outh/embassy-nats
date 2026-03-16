@@ -14,27 +14,44 @@ pub use client::Client;
 
 extern crate alloc;
 
-#[derive(serde::Deserialize, Clone)]
-pub struct NatsInfoMsg {
-    server_id: String,
-    server_name: String,
-    version: String,
-    go: String,
-    host: String,
-    port: i32,
-    headers: bool,
-    max_payload: i32,
-    proto: i32,
+pub struct NatsMsg {
+    pub sid: usize,
+    pub topic: String,
+    pub data: Vec<u8>,
 }
 
-type MsgChannel<'a> = channel::DynamicSender<'a, Vec<u8>>;
+#[derive(serde::Deserialize, Clone)]
+pub struct NatsInfoMsg {
+    pub server_id: String,
+    pub server_name: String,
+    pub version: String,
+    pub go: String,
+    pub host: String,
+    pub port: i32,
+    pub headers: bool,
+    pub max_payload: i32,
+    pub proto: i32,
+}
+
+const RECV_BUF: usize = 5;
+
+type MsgChannel = channel::Channel<ThreadModeRawMutex, NatsMsg, RECV_BUF>;
+type MsgSender<'a> = channel::Sender<'a, ThreadModeRawMutex, NatsMsg, RECV_BUF>;
+type MsgReceiver<'a> = channel::Receiver<'a, ThreadModeRawMutex, NatsMsg, RECV_BUF>;
 
 type InfoWatch = watch::Watch<ThreadModeRawMutex, NatsInfoMsg, 0>;
-type CmdChannel<'a> = channel::Channel<ThreadModeRawMutex, InternalCmd<'a>, 1>;
+type InfoSender<'a> = watch::Sender<'a, ThreadModeRawMutex, NatsInfoMsg, 0>;
+type InfoReceiver<'a> = watch::DynAnonReceiver<'a, NatsInfoMsg>;
+
+const CMD_BUF: usize = 1;
+
+type CmdChannel<'a> = channel::Channel<ThreadModeRawMutex, InternalCmd<'a>, CMD_BUF>;
+type CmdSender<'a> = channel::Sender<'a, ThreadModeRawMutex, InternalCmd<'a>, CMD_BUF>;
+type CmdReceiver<'a> = channel::Receiver<'a, ThreadModeRawMutex, InternalCmd<'a>, CMD_BUF>;
 
 enum InternalCmd<'a> {
     Pub(String, Vec<u8>),
-    Sub(String, MsgChannel<'a>)
+    Sub(String, MsgSender<'a>)
 }
 
 pub trait NatsAuthenticator {
@@ -85,13 +102,13 @@ impl<'a> Storage<'a> {
     }
 }
 
-pub fn new_with_user_pwd<'d, 'a>(
+pub fn new_with_user_pwd<'a>(
     user: &str,
     pwd: &str,
     address: SocketAddr,
-    socket: TcpSocket<'d>,
+    socket: TcpSocket<'a>,
     storage: &'a mut Storage<'a>,
-) -> (Client<'a>, Runner<'d, 'a, UserPwdAuthenticator>) {
+) -> (Client<'a>, Runner<'a, UserPwdAuthenticator>) {
     let auth = UserPwdAuthenticator::new(user, pwd);
 
     let client = Client::new(storage.info_watch.dyn_anon_receiver(), storage.cmd_channel.sender());

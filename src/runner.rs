@@ -5,38 +5,35 @@ use alloc::{collections::btree_map::BTreeMap, format, string::String, vec::Vec};
 use defmt::{error, warn};
 use embassy_futures::select::{Either, select};
 use embassy_net::tcp::{self, TcpSocket};
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel, watch};
 use embedded_io_async::{Write};
 
-use crate::{InternalCmd, NatsAuthenticator, NatsInfoMsg};
+use crate::{CmdReceiver, InfoSender, InternalCmd, MsgSender, NatsAuthenticator, NatsInfoMsg, NatsMsg};
 
 enum State {
     Disconnected,
     Connected,
 }
 
-type InfoWatch<'a> = watch::Sender<'a, ThreadModeRawMutex, NatsInfoMsg, 0>;
-type CmdChannel<'a> = channel::Receiver<'a, ThreadModeRawMutex, InternalCmd<'a>, 1>;
 
-pub struct Runner<'d, 'a, A: NatsAuthenticator> {
+pub struct Runner<'a, A: NatsAuthenticator> {
     auth: A,
     state: State,
     address: SocketAddr,
-    socket: TcpSocket<'d>,
+    socket: TcpSocket<'a>,
 
-    info_watch: InfoWatch<'a>,
-    cmd_channel: CmdChannel<'a>,
+    info_watch: InfoSender<'a>,
+    cmd_channel: CmdReceiver<'a>,
 
-    sub_map: BTreeMap<usize, channel::DynamicSender<'a, Vec<u8>>>,
+    sub_map: BTreeMap<usize, MsgSender<'a>>,
     framer: Framer,
 }
-impl<'d, 'a, A: NatsAuthenticator> Runner<'d, 'a, A> {
+impl<'a, A: NatsAuthenticator> Runner<'a, A> {
     pub(crate) fn new(
         auth: A,
         address: SocketAddr,
-        socket: TcpSocket<'d>,
-        info_watch: InfoWatch<'a>,
-        cmd_channel: CmdChannel<'a>,
+        socket: TcpSocket<'a>,
+        info_watch: InfoSender<'a>,
+        cmd_channel: CmdReceiver<'a>,
     ) -> Self {
         let state = State::Disconnected;
         Self {
@@ -71,7 +68,7 @@ impl<'d, 'a, A: NatsAuthenticator> Runner<'d, 'a, A> {
                 },
                 Frame::Msg(nats_msg) => {
                     if let Some(ch) = self.sub_map.get(&nats_msg.sid) {
-                        ch.send(nats_msg.data).await;
+                        ch.send(nats_msg).await;
                     } else {
                         // TODO unsub
                     }
@@ -80,7 +77,7 @@ impl<'d, 'a, A: NatsAuthenticator> Runner<'d, 'a, A> {
         }
         Ok(())
     }
-    async fn subscribe(&mut self, topic: String, channel: channel::DynamicSender<'a, Vec<u8>>) -> Result<(), tcp::Error> {
+    async fn subscribe(&mut self, topic: String, channel: MsgSender<'a>) -> Result<(), tcp::Error> {
         let sid = self.sub_map.keys().enumerate().find(|(i, k)| i < k).map(|(i, _)| i).unwrap_or(0);
         self.sub_map.insert(sid, channel);
 
@@ -133,17 +130,12 @@ impl<'d, 'a, A: NatsAuthenticator> Runner<'d, 'a, A> {
         }
     }
 }
-impl<'d, 'a, A: NatsAuthenticator> Drop for Runner<'d, 'a, A> {
+impl<'a, A: NatsAuthenticator> Drop for Runner<'a, A> {
     fn drop(&mut self) {
         self.socket.close();
     }
 }
 
-struct NatsMsg {
-    sid: usize,
-    topic: String,
-    data: Vec<u8>,
-}
 
 enum FramerState {
     Sync,
