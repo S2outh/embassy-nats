@@ -111,8 +111,8 @@ pub fn new_with_user_pwd<'a>(
 ) -> (Client<'a>, Runner<'a, UserPwdAuthenticator>) {
     let auth = UserPwdAuthenticator::new(user, pwd);
 
-    let client = Client::new(storage.info_watch.dyn_anon_receiver(), storage.cmd_channel.sender());
     let runner = Runner::new(auth, address, socket, storage.info_watch.sender(), storage.cmd_channel.receiver());
+    let client = Client::new(storage);
 
     (client, runner)
 }

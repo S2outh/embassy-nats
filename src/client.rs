@@ -5,9 +5,10 @@ use alloc::{string::String, vec::Vec};
 use embassy_futures::select::select_slice;
 use embassy_sync::channel::ReceiveFuture;
 
-use crate::{CmdSender, InfoReceiver, InternalCmd, MsgChannel, MsgReceiver, NatsInfoMsg, NatsMsg};
+use crate::{CmdSender, InfoReceiver, InternalCmd, MsgChannel, MsgReceiver, NatsInfoMsg, NatsMsg, Storage};
 
 pub struct Client<'a> {
+    storage: &'a Storage<'a>,
     info_watch: InfoReceiver<'a>,
     cmd_channel: CmdSender<'a>,
 
@@ -15,10 +16,12 @@ pub struct Client<'a> {
 }
 impl<'a> Client<'a> {
     pub(crate) fn new(
-        info_watch: InfoReceiver<'a>,
-        cmd_channel: CmdSender<'a>,
+        storage: &'a Storage<'a>
     ) -> Self {
+        let info_watch = storage.info_watch.dyn_anon_receiver();
+        let cmd_channel = storage.cmd_channel.sender();
         Self {
+            storage,
             info_watch,
             cmd_channel,
             sub_vec: Vec::new(),
@@ -37,5 +40,10 @@ impl<'a> Client<'a> {
     }
     pub async fn get_info(&mut self) -> Option<NatsInfoMsg> {
         self.info_watch.try_get()
+    }
+}
+impl<'a> Clone for Client<'a> {
+    fn clone(&self) -> Self {
+        Client::new(self.storage)
     }
 }
