@@ -56,6 +56,7 @@ impl<'a, A: NatsAuthenticator> Runner<'a, A> {
             match frame {
                 Frame::Ping => self.socket.write_all("PONG\r\n".as_bytes()).await?,
                 Frame::Info(info) => {
+                    defmt::info!("connected to nats: {}", info.server_name);
                     self.info_watch.send(info);
                     let msg = format!(
                         "CONNECT {}\r\n",
