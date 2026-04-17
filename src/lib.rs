@@ -35,7 +35,7 @@ pub struct NatsInfoMsg {
 
 const RECV_BUF: usize = 5;
 
-type MsgChannel = channel::Channel<ThreadModeRawMutex, NatsMsg, RECV_BUF>;
+pub type MsgChannel = channel::Channel<ThreadModeRawMutex, NatsMsg, RECV_BUF>;
 type MsgSender<'a> = channel::Sender<'a, ThreadModeRawMutex, NatsMsg, RECV_BUF>;
 type MsgReceiver<'a> = channel::Receiver<'a, ThreadModeRawMutex, NatsMsg, RECV_BUF>;
 
