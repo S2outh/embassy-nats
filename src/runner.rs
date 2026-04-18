@@ -2,7 +2,7 @@
 use core::net::SocketAddr;
 
 use alloc::{collections::btree_map::BTreeMap, format, string::String, vec::Vec};
-use defmt::{error, warn};
+use defmt::{debug, error, warn};
 use embassy_futures::select::{Either, select};
 use embassy_net::tcp::{self, TcpSocket};
 use embedded_io_async::{Write};
@@ -67,10 +67,13 @@ impl<'a, A: NatsAuthenticator> Runner<'a, A> {
                 Frame::Err => {
                     self.state = State::Disconnected;
                 },
+                Frame::Ok => (),
                 Frame::Msg(nats_msg) => {
                     if let Some(ch) = self.sub_map.get(&nats_msg.sid) {
+                        defmt::debug!("recv");
                         ch.send(nats_msg).await;
                     } else {
+                        defmt::debug!("error recv");
                         // TODO unsub
                     }
                 },
@@ -83,10 +86,12 @@ impl<'a, A: NatsAuthenticator> Runner<'a, A> {
         self.sub_map.insert(sid, channel);
 
         let msg = format!("SUB {} {}\r\n", topic, sid);
+        debug!("sub msg: {}", msg);
         self.socket.write_all(msg.as_bytes()).await
     }
     async fn publish(&mut self, topic: String, data: Vec<u8>) -> Result<(), tcp::Error> {
         let str_header = format!("PUB {} {}\r\n", topic, data.len());
+
         let header = str_header.as_bytes();
         const END: &[u8] = b"\r\n";
 
@@ -147,6 +152,7 @@ enum Frame {
     Ping,
     Info(NatsInfoMsg),
     Err,
+    Ok,
     Msg(NatsMsg),
 }
 
@@ -199,6 +205,9 @@ impl Framer {
                 error!("nats disconnected ({})", msg);
                 return Some(Frame::Err);
             }
+            "+OK" => {
+                return Some(Frame::Ok);
+            },
             "MSG" => {
                 let Some((topic, msg)) = msg.split_once(' ') else {
                     error!("nats msg header parsing error");

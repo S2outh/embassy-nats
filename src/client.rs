@@ -36,8 +36,7 @@ impl<'a> Client<'a> {
         self.cmd_channel.send(InternalCmd::Sub(topic, channel.sender())).await;
     }
     pub async fn receive(&mut self) -> NatsMsg {
-        select_slice(pin!(&mut self.sub_vec.iter().map(|sub| sub.receive()).collect::<Vec<ReceiveFuture<'_, _, _, _>>>()[..])).await.0
-    }
+        select_slice(pin!(&mut self.sub_vec.iter().map(|sub| sub.receive()).collect::<Vec<ReceiveFuture<'_, _, _, _>>>()[..])).await.0 }
     pub async fn get_info(&mut self) -> Option<NatsInfoMsg> {
         self.info_watch.try_get()
     }
