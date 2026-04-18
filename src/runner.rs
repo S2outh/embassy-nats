@@ -72,8 +72,12 @@ impl<'a, A: NatsAuthenticator> Runner<'a, A> {
                     if let Some(ch) = self.sub_map.get(&nats_msg.sid) {
                         ch.send(nats_msg).await;
                     } else {
-                        defmt::error!("Receiving message with no endpoint");
-                        // TODO unsub
+                        defmt::error!("Receiving message with no endpoint, unsubscribing...");
+                        let msg = format!(
+                            "UNSUB {}\r\n",
+                            nats_msg.sid
+                        );
+                        self.socket.write_all(msg.as_bytes()).await?;
                     }
                 },
             }
