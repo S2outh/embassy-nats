@@ -70,10 +70,9 @@ impl<'a, A: NatsAuthenticator> Runner<'a, A> {
                 Frame::Ok => (),
                 Frame::Msg(nats_msg) => {
                     if let Some(ch) = self.sub_map.get(&nats_msg.sid) {
-                        defmt::debug!("recv");
                         ch.send(nats_msg).await;
                     } else {
-                        defmt::debug!("error recv");
+                        defmt::error!("Receiving message with no endpoint");
                         // TODO unsub
                     }
                 },
@@ -210,20 +209,20 @@ impl Framer {
             },
             "MSG" => {
                 let Some((topic, msg)) = msg.split_once(' ') else {
-                    error!("nats msg header parsing error");
+                    error!("nats msg header parsing error (1)");
                     return None;
                 };
                 let Some((sid, msg)) = msg.split_once(' ') else {
-                    error!("nats msg header parsing error");
+                    error!("nats msg header parsing error (2)");
                     return None;
                 };
                 let (_reply_to, len) = msg.split_once(' ').unwrap_or(("", msg));
                 let Ok(sid) = sid.parse::<usize>() else {
-                    error!("nats sid parsing error");
+                    error!("nats sid parsing error: '{}'", sid);
                     return None;
                 };
-                let Ok(len) = len.parse::<usize>() else {
-                    error!("nats msg len parsing error");
+                let Ok(len) = len.trim().parse::<usize>() else {
+                    error!("nats msg len parsing error: '{}'", len);
                     return None;
                 };
                 self.state = FramerState::Msg(len, sid, String::from(topic));
