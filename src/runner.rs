@@ -2,7 +2,7 @@
 use core::net::SocketAddr;
 
 use alloc::{collections::btree_map::BTreeMap, format, string::String, vec::Vec};
-use defmt::{debug, error, warn};
+use defmt::{error, warn};
 use embassy_futures::select::{Either, select};
 use embassy_net::tcp::{self, TcpSocket};
 use embedded_io_async::{Write};
@@ -85,7 +85,6 @@ impl<'a, A: NatsAuthenticator> Runner<'a, A> {
         self.sub_map.insert(sid, channel);
 
         let msg = format!("SUB {} {}\r\n", topic, sid);
-        debug!("sub msg: {}", msg);
         self.socket.write_all(msg.as_bytes()).await
     }
     async fn publish(&mut self, topic: String, data: Vec<u8>) -> Result<(), tcp::Error> {
@@ -173,6 +172,8 @@ impl Framer {
             self.magic_pos += 1;
             if self.magic_pos == CARR_RETURN.len() {
                 self.magic_pos = 0;
+                // removing carriage return from line
+                self.buffer.truncate(self.buffer.len().saturating_sub(2));
                 return self.handle_frame();
             }
         } else {
@@ -221,7 +222,7 @@ impl Framer {
                     error!("nats sid parsing error: '{}'", sid);
                     return None;
                 };
-                let Ok(len) = len.trim().parse::<usize>() else {
+                let Ok(len) = len.parse::<usize>() else {
                     error!("nats msg len parsing error: '{}'", len);
                     return None;
                 };
@@ -235,6 +236,7 @@ impl Framer {
 
     fn sync_msg(&mut self, len: usize, sid: usize, topic: String) -> Option<Frame> {
         if self.buffer.len() >= len {
+            self.state = FramerState::Sync;
             Some(Frame::Msg(NatsMsg {
                 sid,
                 topic: topic,
