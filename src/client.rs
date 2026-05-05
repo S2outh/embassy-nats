@@ -31,7 +31,7 @@ impl<'a> Client<'a> {
     pub async fn publish(&mut self, topic: String, bytes: Vec<u8>) {
         self.cmd_channel.send(InternalCmd::Pub(topic, bytes)).await;
     }
-    pub async fn subscribe(&mut self, topic: String, channel: &'a mut MsgChannel) {
+    pub async fn subscribe(&mut self, topic: String, channel: &'a MsgChannel) {
         self.sub_vec.push(channel.receiver());
         self.cmd_channel.send(InternalCmd::Sub(topic, channel.sender())).await;
     }
