@@ -94,7 +94,7 @@ pub struct Storage<'a> {
     cmd_channel: CmdChannel<'a>,
 }
 impl<'a> Storage<'a> {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         let info_watch = InfoWatch::new();
         let cmd_channel = CmdChannel::new();
         
@@ -107,7 +107,7 @@ pub fn new_with_user_pwd<'a>(
     pwd: &str,
     address: SocketAddr,
     socket: TcpSocket<'a>,
-    storage: &'a mut Storage<'a>,
+    storage: &'a Storage<'a>,
 ) -> (Client<'a>, Runner<'a, UserPwdAuthenticator>) {
     let auth = UserPwdAuthenticator::new(user, pwd);
 
