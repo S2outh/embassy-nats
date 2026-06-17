@@ -11,9 +11,9 @@ use crate::{CmdReceiver, InfoSender, InternalCmd, MsgSender, NatsAuthenticator, 
 
 enum State {
     Disconnected,
+    Authenticating,
     Connected,
 }
-
 
 pub struct Runner<'a, A: NatsAuthenticator> {
     auth: A,
@@ -49,6 +49,10 @@ impl<'a, A: NatsAuthenticator> Runner<'a, A> {
             framer: Framer::new(),
         }
     }
+    fn disconnect(&mut self) {
+        self.socket.close();
+        self.state = State::Disconnected;
+    }
     async fn read(&mut self) -> Result<(), tcp::Error> {
         let mut byte = 0;
         self.socket.read(core::slice::from_mut(&mut byte)).await?;
@@ -62,10 +66,11 @@ impl<'a, A: NatsAuthenticator> Runner<'a, A> {
                         "CONNECT {}\r\n",
                         self.auth.connect_msg()
                     );
+                    self.state = State::Connected;
                     self.socket.write_all(msg.as_bytes()).await?;
                 },
                 Frame::Err => {
-                    self.state = State::Disconnected;
+                    self.disconnect();
                 },
                 Frame::Ok => (),
                 Frame::Msg(nats_msg) => {
@@ -117,14 +122,20 @@ impl<'a, A: NatsAuthenticator> Runner<'a, A> {
             },
         } {
             error!("socket error: {}", e);
-            self.state = State::Disconnected;
+            self.disconnect();
         }; 
+    }
+    async fn run_auth_step(&mut self) {
+        if let Err(e) = self.read().await {
+            error!("socket error: {}", e);
+            self.disconnect();
+        }
     }
     async fn try_connect(&mut self) {
         match self.socket.connect(self.address).await {
             Ok(()) => {
                 self.framer = Framer::new();
-                self.state = State::Connected;
+                self.state = State::Authenticating;
             },
             Err(e) => error!("could not connect to nats: {}", e),
         }
@@ -133,6 +144,7 @@ impl<'a, A: NatsAuthenticator> Runner<'a, A> {
         loop {
             match self.state {
                 State::Connected => self.run_connected().await,
+                State::Authenticating => self.run_auth_step().await,
                 State::Disconnected => self.try_connect().await,
             }
         }
