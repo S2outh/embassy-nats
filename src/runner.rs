@@ -49,8 +49,9 @@ impl<'a, A: NatsAuthenticator> Runner<'a, A> {
             framer: Framer::new(),
         }
     }
-    fn disconnect(&mut self) {
-        self.socket.close();
+    async fn disconnect(&mut self) {
+        self.socket.abort();
+        let _ = self.socket.flush().await;
         self.state = State::Disconnected;
     }
     async fn read(&mut self) -> Result<(), tcp::Error> {
@@ -70,7 +71,7 @@ impl<'a, A: NatsAuthenticator> Runner<'a, A> {
                     self.socket.write_all(msg.as_bytes()).await?;
                 },
                 Frame::Err => {
-                    self.disconnect();
+                    self.disconnect().await;
                 },
                 Frame::Ok => (),
                 Frame::Msg(nats_msg) => {
@@ -122,13 +123,13 @@ impl<'a, A: NatsAuthenticator> Runner<'a, A> {
             },
         } {
             error!("socket error: {}", e);
-            self.disconnect();
+            self.disconnect().await;
         }; 
     }
     async fn run_auth_step(&mut self) {
         if let Err(e) = self.read().await {
             error!("socket error: {}", e);
-            self.disconnect();
+            self.disconnect().await;
         }
     }
     async fn try_connect(&mut self) {
