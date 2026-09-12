@@ -11,10 +11,42 @@ use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel, watch};
 pub use runner::Runner;
 pub use client::Client;
 
+
+// The maximum length of the (json) messages received by nats are important
+// in order to allocate the correct heapless:: type lengths.
+// Here is a collection of necessary constants and calculated sizes
+const fn max(a: usize, b: usize) -> usize {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// The NATS ending delimiter
+const DELIM: [u8; 2] = *b"\r\n";
+
+// for UserPasswordAuth (trivially the longer one with empty filelds),
+// this equals to 112 bytes base (string with empty user / pwd / name / version)
+// + max(user and password max length, token max length)
+// + project name and version length:
+const AUTH_MAX_STR_LEN: usize = 112
+    + max(USR_PASS_STR_SIZE * 2, TOKEN_STR_SIZE)
+    + env!("CARGO_PKG_NAME").len() + env!("CARGO_PKG_VERSION").len();
+
+// The base (empty strings, i32::MIN) length for NatsInfoMsg equals to 142.
+// The total length is base + 5 * max metadata string length
+const INFO_MAX_STR_LEN: usize = 145
+    + 5 * NATS_METADATA_STR_SIZE;
+
+// The size of U32 MAX in decimal is 10 bytes
+const U32_MAX_STR_LEN: usize = 10;
+
 pub trait NatsConfig {
     type Topic: StrBuf;
     type Msg: BytesBuf;
     type Buf: BytesBuf;
+    const _CHECK: ();
 }
 
 pub trait StrBuf: Sized + Clone {
@@ -41,6 +73,7 @@ impl NatsConfig for Alloc {
     type Topic = alloc::string::String;
     type Msg = alloc::vec::Vec<u8>;
     type Buf = alloc::vec::Vec<u8>;
+    const _CHECK: () = ();
 }
 
 #[cfg(feature = "alloc")]
@@ -78,6 +111,9 @@ impl<const TOPIC: usize, const PAYLOAD: usize, const BUF: usize> NatsConfig for 
     type Topic = heapless::String<TOPIC>;
     type Msg = heapless::Vec<u8, PAYLOAD>;
     type Buf = heapless::Vec<u8, BUF>;
+    // This checks that the buf is big enough to fit the maximum length of messages the client
+    // is able to receive
+    const _CHECK: () = assert!(max(PAYLOAD + DELIM.len(), INFO_MAX_STR_LEN + "INFO ".len()) < BUF, "The length of BUF should be greater");
 }
 
 impl<const TOPIC: usize> StrBuf for heapless::String<TOPIC> {
@@ -117,14 +153,14 @@ where C: NatsConfig {
 
 // server_id and server_name are up to 56 chars.
 // 64 is therefore a good upper bound for this metadata.
-type NatsMetadataString = heapless::String<64>;
+const NATS_METADATA_STR_SIZE: usize = 64;
 #[derive(serde::Deserialize, Clone)]
 pub struct NatsInfoMsg {
-    pub server_id: NatsMetadataString,
-    pub server_name: NatsMetadataString,
-    pub version: NatsMetadataString,
-    pub go: NatsMetadataString,
-    pub host: NatsMetadataString,
+    pub server_id: heapless::String<NATS_METADATA_STR_SIZE>,
+    pub server_name: heapless::String<NATS_METADATA_STR_SIZE>,
+    pub version: heapless::String<NATS_METADATA_STR_SIZE>,
+    pub go: heapless::String<NATS_METADATA_STR_SIZE>,
+    pub host: heapless::String<NATS_METADATA_STR_SIZE>,
     pub port: i32,
     pub headers: bool,
     pub max_payload: i32,
@@ -150,16 +186,19 @@ where C: NatsConfig {
     Sub(C::Topic, MsgSender<'a, C>)
 }
 
-pub trait NatsAuthenticator: serde::Serialize {}
+mod sealed {
+    pub trait Sealed {}
+}
+pub trait NatsAuthenticator: serde::Serialize + sealed::Sealed {}
 
-type UsrPassString = heapless::String<20>;
+const USR_PASS_STR_SIZE: usize = 20;
 #[derive(serde::Serialize)]
 pub struct UserPwdAuthenticator {
     verbose: bool,
     pedantic: bool,
     tls_required: bool,
-    user: UsrPassString,
-    pass: UsrPassString,
+    user: heapless::String<USR_PASS_STR_SIZE>,
+    pass: heapless::String<USR_PASS_STR_SIZE>,
     lang: &'static str,
     name: &'static str,
     version: &'static str,
@@ -178,15 +217,16 @@ impl UserPwdAuthenticator {
         })
     }
 }
+impl sealed::Sealed for UserPwdAuthenticator {}
 impl NatsAuthenticator for UserPwdAuthenticator {}
 
-type TokenString = heapless::String<32>;
+const TOKEN_STR_SIZE: usize = 32;
 #[derive(serde::Serialize)]
 pub struct TokenAuthenticator {
     verbose: bool,
     pedantic: bool,
     tls_required: bool,
-    token: TokenString,
+    token: heapless::String<TOKEN_STR_SIZE>,
     lang: &'static str,
     name: &'static str,
     version: &'static str,
@@ -204,6 +244,7 @@ impl TokenAuthenticator {
         })
     }
 }
+impl sealed::Sealed for TokenAuthenticator {}
 impl NatsAuthenticator for TokenAuthenticator {}
 
 pub struct Storage<'a, C>
@@ -214,6 +255,9 @@ where C: NatsConfig {
 impl<'a, C> Storage<'a, C>
 where C: NatsConfig {
     pub const fn new() -> Self {
+        // Force eval the check constant from each trait impl
+        let () = C::_CHECK;
+
         let info_watch = InfoWatch::new();
         let cmd_channel = CmdChannel::new();
         

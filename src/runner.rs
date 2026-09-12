@@ -5,10 +5,7 @@ use embassy_futures::select::{Either, select};
 use embassy_net::tcp::{self, TcpSocket};
 use embedded_io_async::{Write};
 
-use crate::{BytesBuf, CmdReceiver, InfoSender, InternalCmd, MsgSender, NatsAuthenticator, NatsConfig, NatsInfoMsg, NatsMsg, StrBuf};
-
-const DELIM: [u8; 2] = *b"\r\n";
-const U32_MAX_STR_LEN: usize = 10;
+use crate::{DELIM, U32_MAX_STR_LEN, AUTH_MAX_STR_LEN, BytesBuf, CmdReceiver, InfoSender, InternalCmd, MsgSender, NatsAuthenticator, NatsConfig, NatsInfoMsg, NatsMsg, StrBuf};
 
 enum State {
     Disconnected,
@@ -19,15 +16,15 @@ enum State {
 #[derive(defmt::Format)]
 enum Error {
     Disconnected,
-    Tcp(tcp::Error),
+    Tcp,
     Capacity,
-    Ser(serde_json_core::ser::Error),
+    Ser,
     Utf8,
 }
 
 impl From<tcp::Error> for Error {
-    fn from(value: tcp::Error) -> Self {
-        Self::Tcp(value)
+    fn from(_value: tcp::Error) -> Self {
+        Self::Tcp
     }
 }
 
@@ -38,8 +35,8 @@ impl From<heapless::CapacityError> for Error {
 }
 
 impl From<serde_json_core::ser::Error> for Error {
-    fn from(value: serde_json_core::ser::Error) -> Self {
-        Self::Ser(value)
+    fn from(_value: serde_json_core::ser::Error) -> Self {
+        Self::Ser
     }
 }
 
@@ -104,13 +101,11 @@ impl<'a, C: NatsConfig, A: NatsAuthenticator, const N: usize> Runner<'a, C, A, N
                     defmt::info!("connected to nats: {}", info.server_name.as_str());
                     self.info_watch.send(info);
 
-                    const AUTH_STR_MAX_LEN: usize = 200;
-                    let auth_msg = serde_json_core::to_string::<_, AUTH_STR_MAX_LEN>(&self.auth)?;
-                    let auth_msg = auth_msg.as_bytes();
+                    let auth_msg = serde_json_core::to_string::<_, AUTH_MAX_STR_LEN>(&self.auth)?;
 
                     self.state = State::Connected;
                     self.socket.write_all(b"CONNECT ").await?;
-                    self.socket.write_all(auth_msg).await?;
+                    self.socket.write_all(auth_msg.as_bytes()).await?;
                     self.socket.write_all(&DELIM).await?;
                 },
                 Frame::Err => {
@@ -187,7 +182,7 @@ impl<'a, C: NatsConfig, A: NatsAuthenticator, const N: usize> Runner<'a, C, A, N
                 self.framer = Framer::new();
                 self.state = State::Authenticating;
             },
-            Err(e) => defmt::error!("could not connect to nats: {}", e),
+            Err(e) => defmt::error!("could not connect to nats: {}", defmt::Debug2Format(&e)),
         }
     }
     pub async fn run(&mut self) -> ! {
@@ -255,57 +250,69 @@ impl<C: NatsConfig> Framer<C> {
             FramerState::Sync => self.parse_header(),
             FramerState::Msg(len, sid, topic) => self.sync_msg(*len, *sid, topic.clone()),
         };
-        // Clear buffer on err or if state is sync
+        // Clear buffer on err or if state was sync
         if was_sync || !matches!(res, Ok(None)) {
             self.buffer.clear();
         }
         res
     }
+
     fn parse_header(&mut self) -> Result<Option<Frame<C>>, Error> {
+
+        fn parse_msg_header<C: NatsConfig>(msg: &str) -> Result<FramerState<C>, Error> {
+            let Some((topic, msg)) = msg.split_once(' ') else {
+                defmt::error!("nats msg header parsing error (1)");
+                return Ok(FramerState::Sync);
+            };
+            let Some((sid, msg)) = msg.split_once(' ') else {
+                defmt::error!("nats msg header parsing error (2)");
+                return Ok(FramerState::Sync);
+            };
+            let (_reply_to, len) = msg.split_once(' ').unwrap_or(("", msg));
+            let Ok(sid) = sid.parse::<usize>() else {
+                defmt::error!("nats sid parsing error: '{}'", sid);
+                return Ok(FramerState::Sync);
+            };
+            let Ok(len) = len.parse::<usize>() else {
+                defmt::error!("nats msg len parsing error: '{}'", len);
+                return Ok(FramerState::Sync);
+            };
+
+            Ok(FramerState::Msg(len, sid, C::Topic::try_from_str(topic)?))
+        }
+
         let packet_str = core::str::from_utf8(&self.buffer.as_bytes())?;
         let (cmd, msg) = packet_str.trim().split_once(' ').unwrap_or((&packet_str.trim(), ""));
-        match cmd {
+        let res = match cmd {
             "PING" => {
-                return Ok(Some(Frame::Ping))
+                Some(Frame::Ping)
             }
             "INFO" => {
                 if let Ok((info, _)) = serde_json_core::from_str::<NatsInfoMsg>(msg) {
-                    return Ok(Some(Frame::Info(info)))
+                    Some(Frame::Info(info))
                 } else {
                     defmt::warn!("could not decode nats info");
+                    None
                 }
             }
             "-ERR" => {
                 defmt::error!("nats disconnected ({})", msg);
-                return Ok(Some(Frame::Err));
+                Some(Frame::Err)
             }
             "+OK" => {
-                return Ok(Some(Frame::Ok));
+                Some(Frame::Ok)
             },
             "MSG" => {
-                let Some((topic, msg)) = msg.split_once(' ') else {
-                    defmt::error!("nats msg header parsing error (1)");
-                    return Ok(None);
-                };
-                let Some((sid, msg)) = msg.split_once(' ') else {
-                    defmt::error!("nats msg header parsing error (2)");
-                    return Ok(None);
-                };
-                let (_reply_to, len) = msg.split_once(' ').unwrap_or(("", msg));
-                let Ok(sid) = sid.parse::<usize>() else {
-                    defmt::error!("nats sid parsing error: '{}'", sid);
-                    return Ok(None);
-                };
-                let Ok(len) = len.parse::<usize>() else {
-                    defmt::error!("nats msg len parsing error: '{}'", len);
-                    return Ok(None);
-                };
-                self.state = FramerState::Msg(len, sid, C::Topic::try_from_str(topic)?);
+                self.state = parse_msg_header(msg)?;
+                None
             }
-            default => defmt::warn!("unknown nats cmd {}", default),
-        }
+            default => {
+                defmt::warn!("unknown nats cmd {}", default);
+                None
+            }
+        };
 
-        Ok(None)
+        Ok(res)
     }
 
     fn sync_msg(&mut self, len: usize, sid: usize, topic: C::Topic) -> Result<Option<Frame<C>>, Error> {
