@@ -12,6 +12,16 @@ pub use runner::Runner;
 pub use client::Client;
 
 
+// These constants set sane but addmitedly arbitrary upper bounds
+// for the heapless string types in CONNECT and INFO messages
+
+// Maximum length of user and password for auth
+const USR_PASS_STR_SIZE: usize = 20;
+
+// server_id and server_name are up to 56 chars.
+// 64 is therefore a good upper bound for this metadata.
+const INFO_METADATA_STR_SIZE: usize = 64;
+
 // The maximum length of the (json) messages received by nats are important
 // in order to allocate the correct heapless:: type lengths.
 // Here is a collection of necessary constants and calculated sizes
@@ -37,7 +47,7 @@ const AUTH_MAX_STR_LEN: usize = 112
 // The base (empty strings, i32::MIN) length for NatsInfoMsg equals to 142.
 // The total length is base + 5 * max metadata string length
 const INFO_MAX_STR_LEN: usize = 145
-    + 5 * NATS_METADATA_STR_SIZE;
+    + 5 * INFO_METADATA_STR_SIZE;
 
 // The size of U32 MAX in decimal is 10 bytes
 const U32_MAX_STR_LEN: usize = 10;
@@ -113,7 +123,8 @@ impl<const TOPIC: usize, const PAYLOAD: usize, const BUF: usize> NatsConfig for 
     type Buf = heapless::Vec<u8, BUF>;
     // This checks that the buf is big enough to fit the maximum length of messages the client
     // is able to receive
-    const _CHECK: () = assert!(max(PAYLOAD + DELIM.len(), INFO_MAX_STR_LEN + "INFO ".len()) < BUF, "The length of BUF should be greater");
+    const _CHECK: () = assert!(max(PAYLOAD + DELIM.len(), "INFO ".len() + INFO_MAX_STR_LEN) == BUF,
+        "The length of BUF should exactly match max(PAYLOAD + 2; 470)");
 }
 
 impl<const TOPIC: usize> StrBuf for heapless::String<TOPIC> {
@@ -151,16 +162,13 @@ where C: NatsConfig {
     pub data: C::Msg,
 }
 
-// server_id and server_name are up to 56 chars.
-// 64 is therefore a good upper bound for this metadata.
-const NATS_METADATA_STR_SIZE: usize = 64;
 #[derive(serde::Deserialize, Clone)]
 pub struct NatsInfoMsg {
-    pub server_id: heapless::String<NATS_METADATA_STR_SIZE>,
-    pub server_name: heapless::String<NATS_METADATA_STR_SIZE>,
-    pub version: heapless::String<NATS_METADATA_STR_SIZE>,
-    pub go: heapless::String<NATS_METADATA_STR_SIZE>,
-    pub host: heapless::String<NATS_METADATA_STR_SIZE>,
+    pub server_id: heapless::String<INFO_METADATA_STR_SIZE>,
+    pub server_name: heapless::String<INFO_METADATA_STR_SIZE>,
+    pub version: heapless::String<INFO_METADATA_STR_SIZE>,
+    pub go: heapless::String<INFO_METADATA_STR_SIZE>,
+    pub host: heapless::String<INFO_METADATA_STR_SIZE>,
     pub port: i32,
     pub headers: bool,
     pub max_payload: i32,
@@ -191,7 +199,32 @@ mod sealed {
 }
 pub trait NatsAuthenticator: serde::Serialize + sealed::Sealed {}
 
-const USR_PASS_STR_SIZE: usize = 20;
+
+#[derive(serde::Serialize)]
+pub struct NoopAuthenticator {
+    verbose: bool,
+    pedantic: bool,
+    tls_required: bool,
+    lang: &'static str,
+    name: &'static str,
+    version: &'static str,
+}
+impl NoopAuthenticator {
+    fn new() -> Self {
+        Self {
+            verbose: false,
+            pedantic: false,
+            tls_required: false,
+            name: env!("CARGO_PKG_NAME"),
+            lang: "rust",
+            version: env!("CARGO_PKG_VERSION"),
+        }
+    }
+}
+
+impl sealed::Sealed for NoopAuthenticator {}
+impl NatsAuthenticator for NoopAuthenticator {}
+
 #[derive(serde::Serialize)]
 pub struct UserPwdAuthenticator {
     verbose: bool,
@@ -263,6 +296,20 @@ where C: NatsConfig {
         
         Self { info_watch, cmd_channel }
     }
+}
+
+pub fn new_no_auth<'a, C, const N: usize>(
+    address: SocketAddr,
+    socket: TcpSocket<'a>,
+    storage: &'a Storage<'a, C>,
+) -> (Client<'a, C, N>, Runner<'a, C, NoopAuthenticator, N>)
+where C: NatsConfig {
+    let auth = NoopAuthenticator::new();
+
+    let runner = Runner::new(auth, address, socket, storage.info_watch.sender(), storage.cmd_channel.receiver());
+    let client = Client::new(storage);
+
+    (client, runner)
 }
 
 pub fn new_with_user_pwd<'a, C, const N: usize>(

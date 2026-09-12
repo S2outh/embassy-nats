@@ -55,7 +55,7 @@ pub struct Runner<'a, C: NatsConfig, A: NatsAuthenticator, const N: usize> {
     info_watch: InfoSender<'a>,
     cmd_channel: CmdReceiver<'a, C>,
 
-    sub_map: heapless::Vec<(usize, MsgSender<'a, C>), N>,
+    subs: heapless::Vec<(usize, C::Topic, MsgSender<'a, C>), N>,
     framer: Framer<C>,
 }
 impl<'a, C: NatsConfig, A: NatsAuthenticator, const N: usize> Runner<'a, C, A, N> {
@@ -76,7 +76,7 @@ impl<'a, C: NatsConfig, A: NatsAuthenticator, const N: usize> Runner<'a, C, A, N
             info_watch,
             cmd_channel,
 
-            sub_map: heapless::Vec::new(),
+            subs: heapless::Vec::new(),
             framer: Framer::new(),
         }
     }
@@ -107,13 +107,19 @@ impl<'a, C: NatsConfig, A: NatsAuthenticator, const N: usize> Runner<'a, C, A, N
                     self.socket.write_all(b"CONNECT ").await?;
                     self.socket.write_all(auth_msg.as_bytes()).await?;
                     self.socket.write_all(&DELIM).await?;
+
+                    // resubscribe to all existing subscriptions
+                    let resubs: heapless::Vec<_, N> = self.subs.iter().map(|(sid, topic, _)| (*sid, topic.clone())).collect();
+                    for (sid, topic) in resubs {
+                        self.send_sub_msg(sid, topic).await?;
+                    }
                 },
                 Frame::Err => {
                     self.disconnect().await;
                 },
                 Frame::Ok => (),
                 Frame::Msg(nats_msg) => {
-                    if let Some((_, ch)) = self.sub_map.iter().find(|(id, _)| id == &nats_msg.sid) {
+                    if let Some((_, _, ch)) = self.subs.iter().find(|(sid, _, _)| sid == &nats_msg.sid) {
                         ch.send(nats_msg).await;
                     } else {
                         defmt::error!("Receiving message with no endpoint, unsubscribing...");
@@ -126,18 +132,20 @@ impl<'a, C: NatsConfig, A: NatsAuthenticator, const N: usize> Runner<'a, C, A, N
         }
         Ok(())
     }
-    async fn subscribe(&mut self, topic: C::Topic, channel: MsgSender<'a, C>) -> Result<(), Error> {
-        let sid = self.sub_map.len();
-
-        self.sub_map.push((sid, channel)).map_err(|_| Error::Capacity)?;
-
+    async fn send_sub_msg(&mut self, sid: usize, topic: C::Topic) -> Result<(), Error> {
         self.socket.write_all(b"SUB ").await?;
         self.socket.write_all(topic.as_str().as_bytes()).await?;
         self.socket.write_all(b" ").await?;
         self.socket.write_all(heapless::format!(U32_MAX_STR_LEN; "{}", sid).unwrap().as_bytes()).await?;
         self.socket.write_all(&DELIM).await?;
-
         Ok(())
+    }
+    async fn subscribe(&mut self, topic: C::Topic, channel: MsgSender<'a, C>) -> Result<(), Error> {
+        let sid = self.subs.len();
+
+        self.subs.push((sid, topic.clone(), channel)).map_err(|_| Error::Capacity)?;
+
+        self.send_sub_msg(sid, topic).await
     }
     async fn publish(&mut self, topic: C::Topic, data: C::Msg) -> Result<(), Error> {
         let data = data.as_bytes();
