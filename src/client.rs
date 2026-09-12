@@ -39,8 +39,8 @@ where C: NatsConfig {
     /// the entire NATS stack (which in practice almost always means 'static) the user will need to
     /// provide one.
     pub async fn subscribe<const S: usize>(&mut self, topic: C::Topic, channel: &'a MsgChannel<C, S>) -> Result<(), CapacityError> {
-        self.sub_vec.push(channel.dyn_receiver()).map_err(|_| CapacityError::default())?;
-        self.cmd_channel.send(InternalCmd::Sub(topic, channel.dyn_sender())).await;
+        self.sub_vec.push(channel.receiver().into()).map_err(|_| CapacityError::default())?;
+        self.cmd_channel.send(InternalCmd::Sub(topic, channel.sender().into())).await;
         Ok(())
     }
     /// Awaiting receive will await any message from all subscriptions of this client.

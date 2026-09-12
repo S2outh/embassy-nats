@@ -177,8 +177,8 @@ pub struct NatsInfoMsg {
 
 
 pub type MsgChannel<C, const N: usize> = channel::Channel<ThreadModeRawMutex, NatsMsg<C>, N>;
-type MsgSender<'a, C> = channel::DynamicSender<'a, NatsMsg<C>>;
-type MsgReceiver<'a, C> = channel::DynamicReceiver<'a, NatsMsg<C>>;
+type MsgSender<'a, C> = channel::SendDynamicSender<'a, NatsMsg<C>>;
+type MsgReceiver<'a, C> = channel::SendDynamicReceiver<'a, NatsMsg<C>>;
 
 type InfoWatch = watch::Watch<ThreadModeRawMutex, NatsInfoMsg, 0>;
 type InfoSender<'a> = watch::Sender<'a, ThreadModeRawMutex, NatsInfoMsg, 0>;
