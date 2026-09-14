@@ -10,7 +10,7 @@ use framer::Frame;
 use framer::Framer;
 
 use crate::{
-    AUTH_MAX_STR_LEN, BytesBuf, CapacityError, CmdReceiver, DELIM, InfoSender, InternalCmd,
+    AUTH_JSON_MAX_LEN, BytesBuf, CapacityError, CmdReceiver, DELIM, InfoSender, InternalCmd,
     MsgSender, NatsAuthenticator, NatsCollections, StrBuf, U32_MAX_STR_LEN,
 };
 
@@ -94,7 +94,7 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
 
                 // serialize the connect message body into AuthBuf
                 let mut connect_msg = C::AuthBuf::default();
-                let connect_msg_slice = connect_msg.extend_by(AUTH_MAX_STR_LEN)?;
+                let connect_msg_slice = connect_msg.extend_by(AUTH_JSON_MAX_LEN)?;
                 let len = serde_json_core::to_slice(&self.auth, connect_msg_slice)?;
                 connect_msg.truncate(len);
 
@@ -208,9 +208,8 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
             defmt!(error!("nats error: {}", e));
             match e {
                 // If framer had a connection issue disconnect
-                Error::Framer(framer::FramerError::Disconnected) |
-                Error::Framer(framer::FramerError::Read(_))
-                    => self.disconnect().await,
+                Error::Framer(framer::FramerError::Disconnected)
+                | Error::Framer(framer::FramerError::Read(_)) => self.disconnect().await,
                 // else reset framer
                 Error::Framer(_) => self.framer = Framer::new(),
                 // otherwise also disconnect
@@ -236,6 +235,7 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
             )),
         }
     }
+    /// Mainloop entry for the runner
     pub async fn run(&mut self) -> ! {
         loop {
             match self.state {
@@ -251,4 +251,3 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Drop for Runn
         self.socket.abort();
     }
 }
-

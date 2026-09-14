@@ -1,7 +1,7 @@
 use embedded_io_async::Read;
 use thiserror::Error;
 
-use crate::{BytesBuf, StrBuf, CapacityError, DELIM, NatsCollections, NatsInfoMsg, NatsMsg};
+use crate::{BytesBuf, CapacityError, DELIM, NatsCollections, NatsInfoMsg, NatsMsg, StrBuf};
 
 macro_rules! defmt {
     ($($t:tt)*) => {{
@@ -88,31 +88,38 @@ impl<C: NatsCollections> Framer<C> {
     pub fn new() -> Self {
         Self::Sync(SyncFramer::new())
     }
+
     /// Call the provided reader.read() function exactly once,
-    /// and return a frame if it can be finished
-    pub async fn frame<R: Read>(&mut self, reader: &mut R) -> Result<Option<Frame<C>>, FramerError<R::Error>> {
+    /// and return a frame if it can be finished.
+    /// On error the state of the framer is not defined, and
+    /// a reset of the framer is expected.
+    pub async fn frame<R: Read>(
+        &mut self,
+        reader: &mut R,
+    ) -> Result<Option<Frame<C>>, FramerError<R::Error>> {
         let internal_frame = match self {
             Self::Sync(framer) => framer.frame(reader).await,
             Self::Msg(framer) => framer.frame(reader).await,
         }?;
-        match internal_frame {
+        Ok(match internal_frame {
             InternalFrame::MsgHeader { topic, len, sid } => {
                 *self = Self::Msg(MsgFramer::new(topic, len, sid));
-                Ok(None)
-            },
+                None
+            }
             InternalFrame::MsgDone => {
-                let Self::Msg(framer) = core::mem::replace(self, Self::Sync(SyncFramer::new())) else { panic!() };
-                Ok(Some(framer.finalize()))
-            },
-            InternalFrame::Ok => Ok(Some(Frame::Ok)),
-            InternalFrame::Err => Ok(Some(Frame::Err)),
-            InternalFrame::Ping => Ok(Some(Frame::Ping)),
-            InternalFrame::Info(info) => Ok(Some(Frame::Info(info))),
-            InternalFrame::None => Ok(None),
-        }
+                let Self::Msg(framer) = core::mem::replace(self, Self::Sync(SyncFramer::new()))
+                else {
+                    panic!()
+                };
+                Some(framer.finalize())
+            }
+            InternalFrame::Ok => Some(Frame::Ok),
+            InternalFrame::Err => Some(Frame::Err),
+            InternalFrame::Ping => Some(Frame::Ping),
+            InternalFrame::Info(info) => Some(Frame::Info(info)),
+            InternalFrame::None => None,
+        })
     }
-
-
 }
 
 impl<C: NatsCollections> SyncFramer<C> {
@@ -123,11 +130,14 @@ impl<C: NatsCollections> SyncFramer<C> {
         }
     }
 
-    async fn frame<R: Read>(&mut self, reader: &mut R) -> Result<InternalFrame<C>, FramerError<R::Error>> {
+    async fn frame<R: Read>(
+        &mut self,
+        reader: &mut R,
+    ) -> Result<InternalFrame<C>, FramerError<R::Error>> {
         let slice = self.buffer.extend_by(1)?;
         let n = reader.read(slice).await.map_err(|e| FramerError::Read(e))?;
         if n == 0 {
-           return Err(FramerError::Disconnected);
+            return Err(FramerError::Disconnected);
         }
 
         if slice[0] == DELIM[self.magic_pos] {
@@ -147,7 +157,9 @@ impl<C: NatsCollections> SyncFramer<C> {
     }
 
     fn parse_header<E>(&mut self) -> Result<InternalFrame<C>, FramerError<E>> {
-        fn parse_msg_header<E, C: NatsCollections>(msg: &str) -> Result<InternalFrame<C>, FramerError<E>> {
+        fn parse_msg_header<E, C: NatsCollections>(
+            msg: &str,
+        ) -> Result<InternalFrame<C>, FramerError<E>> {
             let Some((topic, msg)) = msg.split_once(' ') else {
                 defmt!(error!("nats msg header parsing error (1)"));
                 return Err(FramerError::Header);
@@ -169,16 +181,12 @@ impl<C: NatsCollections> SyncFramer<C> {
             Ok(InternalFrame::MsgHeader {
                 len,
                 sid,
-                topic: C::Topic::try_from_str(topic)?
+                topic: C::Topic::try_from_str(topic)?,
             })
         }
 
         let mut packet_str = core::str::from_utf8(&self.buffer.as_bytes())?;
-        packet_str = &packet_str[..(packet_str.len() - 2)];
-
-        if packet_str.is_empty() {
-            return Ok(InternalFrame::None)
-        }
+        packet_str = &packet_str[..(packet_str.len() - DELIM.len())];
 
         let (cmd, msg) = packet_str
             .trim()
@@ -189,15 +197,13 @@ impl<C: NatsCollections> SyncFramer<C> {
         // implementations
         match cmd {
             "PING" => Ok(InternalFrame::Ping),
-            "INFO" => {
-                match serde_json_core::from_str::<NatsInfoMsg>(msg) {
-                    Ok((info, _)) => Ok(InternalFrame::Info(info)),
-                    Err(e) => {
-                        defmt!(warn!("could not decode nats INFO"));
-                        Err(FramerError::Deser(e))
-                    }
+            "INFO" => match serde_json_core::from_str::<NatsInfoMsg>(msg) {
+                Ok((info, _)) => Ok(InternalFrame::Info(info)),
+                Err(e) => {
+                    defmt!(warn!("could not decode nats INFO"));
+                    Err(FramerError::Deser(e))
                 }
-            }
+            },
             "-ERR" => {
                 defmt!(error!("nats disconnected ({})", msg));
                 Ok(InternalFrame::Err)
@@ -212,7 +218,7 @@ impl<C: NatsCollections> SyncFramer<C> {
     }
 }
 
-impl <C: NatsCollections> MsgFramer<C> {
+impl<C: NatsCollections> MsgFramer<C> {
     fn new(topic: C::Topic, len: usize, sid: usize) -> Self {
         Self {
             buffer: C::MsgBuf::default(),
@@ -222,22 +228,31 @@ impl <C: NatsCollections> MsgFramer<C> {
             sid,
         }
     }
-    async fn frame<R: Read>(&mut self, reader: &mut R) -> Result<InternalFrame<C>, FramerError<R::Error>> {
-        let slice = self.buffer.extend_by(self.len - self.pos)?;
+    async fn frame<R: Read>(
+        &mut self,
+        reader: &mut R,
+    ) -> Result<InternalFrame<C>, FramerError<R::Error>> {
+        let slice = self.buffer.extend_by((self.len + DELIM.len()) - self.pos)?;
         let n = reader.read(slice).await.map_err(|e| FramerError::Read(e))?;
-        if n == 0 && self.len > 0 {
-           return Err(FramerError::Disconnected);
+        if n == 0 {
+            return Err(FramerError::Disconnected);
         }
-        
+
         self.pos += n;
         self.buffer.truncate(self.pos);
-        if self.pos >= self.len {
+        if self.pos >= (self.len + DELIM.len()) {
+            // drop the delimeter from the end
+            self.buffer.truncate(self.len);
             Ok(InternalFrame::MsgDone)
         } else {
             Ok(InternalFrame::None)
         }
     }
     fn finalize(self) -> Frame<C> {
-        Frame::Msg(NatsMsg { sid: self.sid, topic: self.topic, data: self.buffer })
+        Frame::Msg(NatsMsg {
+            sid: self.sid,
+            topic: self.topic,
+            data: self.buffer,
+        })
     }
 }

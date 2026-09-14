@@ -10,7 +10,6 @@ use embassy_net::tcp::TcpSocket;
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel, watch};
 pub use runner::Runner;
 use thiserror::Error;
-use heapless::CapacityError as HeaplessErr;
 
 // Private module to seal traits
 mod sealed {
@@ -43,7 +42,7 @@ const DELIM: [u8; 2] = *b"\r\n";
 // this equals to 112 bytes base (string with empty user / pwd / name / version)
 // + max(user and password max length, token max length)
 // + project name and version length:
-const AUTH_MAX_STR_LEN: usize = 112
+const AUTH_JSON_MAX_LEN: usize = 112
     + max(USR_PASS_STR_SIZE * 2, TOKEN_STR_SIZE)
     + env!("CARGO_PKG_NAME").len()
     + env!("CARGO_PKG_VERSION").len();
@@ -51,7 +50,7 @@ const AUTH_MAX_STR_LEN: usize = 112
 // The base (empty strings, i32::MIN) length for NatsInfoMsg equals to 142.
 // The total length is prefix + base + 5 * max metadata string length + delimeter.
 // This information is also used to compute the required size of the Header receive buffer
-const INFO_MAX_STR_LEN: usize = "INFO ".len() + 145 + 5 * INFO_METADATA_STR_SIZE + DELIM.len();
+const INFO_MSG_MAX_LEN: usize = "INFO ".len() + 145 + 5 * INFO_METADATA_STR_SIZE + DELIM.len();
 
 // The size of U32 MAX in decimal is 10 bytes
 const U32_MAX_STR_LEN: usize = 10;
@@ -65,6 +64,8 @@ pub enum CapacityError {
     Bytes,
     #[error("N: Subscriptions")]
     Subscriptions,
+    #[error("Heapless capacity error")]
+    Other(#[from] heapless::CapacityError),
 }
 
 /// This trait is a container for collections used througout this library,
@@ -149,8 +150,8 @@ impl<const TOPIC: usize, const PAYLOAD: usize> sealed::Sealed for Heapless<TOPIC
 impl<const TOPIC: usize, const PAYLOAD: usize> NatsCollections for Heapless<TOPIC, PAYLOAD> {
     type Topic = heapless::String<TOPIC>;
     type MsgBuf = heapless::Vec<u8, PAYLOAD>;
-    type SyncBuf = heapless::Vec<u8, INFO_MAX_STR_LEN>;
-    type AuthBuf = heapless::Vec<u8, AUTH_MAX_STR_LEN>;
+    type SyncBuf = heapless::Vec<u8, INFO_MSG_MAX_LEN>;
+    type AuthBuf = heapless::Vec<u8, AUTH_JSON_MAX_LEN>;
 }
 
 impl<const TOPIC: usize> StrBuf for heapless::String<TOPIC> {
@@ -165,7 +166,7 @@ impl<const TOPIC: usize> StrBuf for heapless::String<TOPIC> {
 impl<const PAYLOAD: usize> BytesBuf for heapless::Vec<u8, PAYLOAD> {
     fn extend_by(&mut self, len: usize) -> Result<&mut [u8], CapacityError> {
         if self.capacity() - self.len() < len {
-            return Err(CapacityError::Bytes)
+            return Err(CapacityError::Bytes);
         }
         let before = self.len();
         self.extend(core::iter::repeat_n(0, len));
@@ -266,7 +267,7 @@ pub struct UserPwdAuthenticator {
     version: &'static str,
 }
 impl UserPwdAuthenticator {
-    fn new(user: &str, pwd: &str) -> Result<Self, HeaplessErr> {
+    fn new(user: &str, pwd: &str) -> Result<Self, CapacityError> {
         Ok(Self {
             verbose: false,
             pedantic: false,
@@ -294,7 +295,7 @@ pub struct TokenAuthenticator {
     version: &'static str,
 }
 impl TokenAuthenticator {
-    fn new(auth_token: &str) -> Result<Self, HeaplessErr> {
+    fn new(auth_token: &str) -> Result<Self, CapacityError> {
         Ok(Self {
             verbose: false,
             pedantic: false,
@@ -309,6 +310,7 @@ impl TokenAuthenticator {
 impl sealed::Sealed for TokenAuthenticator {}
 impl NatsAuthenticator for TokenAuthenticator {}
 
+/// Static storage of sync types used by an nats runner instance
 pub struct Storage<'a, C>
 where
     C: NatsCollections,
@@ -320,6 +322,7 @@ impl<'a, C> Storage<'a, C>
 where
     C: NatsCollections,
 {
+    /// Create a new instance of the storage
     pub const fn new() -> Self {
         let info_watch = InfoWatch::new();
         let cmd_channel = CmdChannel::new();
@@ -331,6 +334,7 @@ where
     }
 }
 
+/// Create a new embassy runner/client pair without authentication
 pub fn new_no_auth<'a, C, const N: usize>(
     address: SocketAddr,
     socket: TcpSocket<'a>,
@@ -353,13 +357,14 @@ where
     (client, runner)
 }
 
+/// Create a new embassy runner/client pair with username / password authentication
 pub fn new_with_user_pwd<'a, C, const N: usize>(
     user: &str,
     pwd: &str,
     address: SocketAddr,
     socket: TcpSocket<'a>,
     storage: &'a Storage<'a, C>,
-) -> Result<(Client<'a, C, N>, Runner<'a, C, UserPwdAuthenticator, N>), HeaplessErr>
+) -> Result<(Client<'a, C, N>, Runner<'a, C, UserPwdAuthenticator, N>), CapacityError>
 where
     C: NatsCollections,
 {
@@ -377,12 +382,13 @@ where
     Ok((client, runner))
 }
 
+/// Create a new embassy runner/client pair with token authentication
 pub fn new_with_auth_token<'a, C, const N: usize>(
     auth_token: &str,
     address: SocketAddr,
     socket: TcpSocket<'a>,
     storage: &'a Storage<'a, C>,
-) -> Result<(Client<'a, C, N>, Runner<'a, C, TokenAuthenticator, N>), HeaplessErr>
+) -> Result<(Client<'a, C, N>, Runner<'a, C, TokenAuthenticator, N>), CapacityError>
 where
     C: NatsCollections,
 {
