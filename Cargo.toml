@@ -6,6 +6,7 @@ authors = [ "Eliseo Cailloux" ]
 
 [features]
 alloc = []
+defmt = [ "dep:defmt", "embassy-sync/defmt", "embassy-futures/defmt", "embassy-net/defmt", "serde-json-core/defmt" ]
 
 [dependencies]
 
@@ -14,13 +15,13 @@ embassy-futures = { version = "0.1.2" }
 embassy-net = { version = "0.9.1", features = ["tcp", "dhcpv4", "proto-ipv4", "proto-ipv6" ] }
 embedded-io-async = "0.7.0"
 
-defmt = "1.1"
+serde = { version = "1.0.229", default-features = false, features = ["derive"] }
+serde-json-core = { version = "0.6.0" }
+heapless = { version = "0.9.3", features = ["serde"] }
 
 thiserror = { version = "2.0.20", default-features = false }
 
-serde = { version = "1.0.229", default-features = false, features = ["derive"] }
-serde-json-core = { version = "0.6.0", features = ["defmt"] }
-heapless = { version = "0.9.3", features = ["serde"] }
+defmt = { version = "1.1", optional = true }
 
 [profile.release]
 debug = 2

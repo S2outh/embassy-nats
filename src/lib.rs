@@ -1,16 +1,26 @@
 #![no_std]
 
-mod runner;
 mod client;
+mod runner;
 
 use core::net::SocketAddr;
 
-use heapless::CapacityError;
+pub use client::Client;
 use embassy_net::tcp::TcpSocket;
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel, watch};
 pub use runner::Runner;
-pub use client::Client;
+use thiserror::Error;
+use heapless::CapacityError as HeaplessErr;
 
+// Private module to seal traits
+mod sealed {
+    pub trait Sealed {}
+}
+
+// constant implementation of usize::max
+const fn max(a: usize, b: usize) -> usize {
+    if a > b { a } else { b }
+}
 
 // These constants set sane but addmitedly arbitrary upper bounds
 // for the heapless string types in CONNECT and INFO messages
@@ -25,51 +35,63 @@ const INFO_METADATA_STR_SIZE: usize = 64;
 // The maximum length of the (json) messages received by nats are important
 // in order to allocate the correct heapless:: type lengths.
 // Here is a collection of necessary constants and calculated sizes
-const fn max(a: usize, b: usize) -> usize {
-    if a > b {
-        a
-    } else {
-        b
-    }
-}
 
 // The NATS ending delimiter
 const DELIM: [u8; 2] = *b"\r\n";
 
-// for UserPasswordAuth (trivially the longer one with empty filelds),
+// for UserPasswordAuth (trivially the longest one with empty filelds),
 // this equals to 112 bytes base (string with empty user / pwd / name / version)
 // + max(user and password max length, token max length)
 // + project name and version length:
 const AUTH_MAX_STR_LEN: usize = 112
     + max(USR_PASS_STR_SIZE * 2, TOKEN_STR_SIZE)
-    + env!("CARGO_PKG_NAME").len() + env!("CARGO_PKG_VERSION").len();
+    + env!("CARGO_PKG_NAME").len()
+    + env!("CARGO_PKG_VERSION").len();
 
 // The base (empty strings, i32::MIN) length for NatsInfoMsg equals to 142.
-// The total length is base + 5 * max metadata string length
-const INFO_MAX_STR_LEN: usize = 145
-    + 5 * INFO_METADATA_STR_SIZE;
+// The total length is prefix + base + 5 * max metadata string length + delimeter.
+// This information is also used to compute the required size of the Header receive buffer
+const INFO_MAX_STR_LEN: usize = "INFO ".len() + 145 + 5 * INFO_METADATA_STR_SIZE + DELIM.len();
 
 // The size of U32 MAX in decimal is 10 bytes
 const U32_MAX_STR_LEN: usize = 10;
 
-pub trait NatsConfig {
-    type Topic: StrBuf;
-    type Msg: BytesBuf;
-    type Buf: BytesBuf;
-    const _CHECK: ();
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Error)]
+pub enum CapacityError {
+    #[error("C: StrBuf")]
+    Str,
+    #[error("C: BytesBuf")]
+    Bytes,
+    #[error("N: Subscriptions")]
+    Subscriptions,
 }
 
+/// This trait is a container for collections used througout this library,
+/// and can be used to switch between heapless and alloc types.
+pub trait NatsCollections: sealed::Sealed {
+    type Topic: StrBuf;
+    type MsgBuf: BytesBuf;
+    type SyncBuf: BytesBuf;
+    type AuthBuf: BytesBuf;
+}
+
+/// A String buffer, containing methods to convert from and to &str
 pub trait StrBuf: Sized + Clone {
     fn try_from_str(s: &str) -> Result<Self, CapacityError>;
     fn as_str(&self) -> &str;
 }
 
+/// A Bytes buffer, containing methods to extend, clear and retreive info from a buffer
 pub trait BytesBuf: Sized + Default {
-    fn try_from_bytes(b: &[u8]) -> Result<Self, CapacityError>;
-    fn len(&self) -> usize;
-    fn push(&mut self, b: u8) -> Result<(), CapacityError>;
-    fn as_bytes(&self) -> &[u8];
+    /// This method tries to extend the buffer by len, and returns the mutable slice of data
+    /// that has been added
+    fn extend_by(&mut self, len: usize) -> Result<&mut [u8], CapacityError>;
+    /// keep only the first len bytes, or less if the collection is not large enough
+    fn truncate(&mut self, len: usize);
     fn clear(&mut self);
+    fn as_bytes(&self) -> &[u8];
+    fn len(&self) -> usize;
 }
 
 #[cfg(feature = "alloc")]
@@ -79,11 +101,14 @@ extern crate alloc;
 pub struct Alloc;
 
 #[cfg(feature = "alloc")]
-impl NatsConfig for Alloc {
+impl sealed::Sealed for Alloc {}
+
+#[cfg(feature = "alloc")]
+impl NatsCollections for Alloc {
     type Topic = alloc::string::String;
-    type Msg = alloc::vec::Vec<u8>;
-    type Buf = alloc::vec::Vec<u8>;
-    const _CHECK: () = ();
+    type MsgBuf = alloc::vec::Vec<u8>;
+    type SyncBuf = alloc::vec::Vec<u8>;
+    type AuthBuf = alloc::vec::Vec<u8>;
 }
 
 #[cfg(feature = "alloc")]
@@ -98,38 +123,39 @@ impl StrBuf for alloc::string::String {
 
 #[cfg(feature = "alloc")]
 impl BytesBuf for alloc::vec::Vec<u8> {
-    fn try_from_bytes(b: &[u8]) -> Result<Self, CapacityError> {
-        Ok(alloc::vec::Vec::from(b))
+    fn extend_by(&mut self, len: usize) -> Result<&mut [u8], CapacityError> {
+        let before = self.len();
+        self.extend(core::iter::repeat_n(0, len));
+        Ok(&mut self[before..])
     }
-    fn len(&self) -> usize {
-        self.as_bytes().len()
-    }
-    fn push(&mut self, b: u8) -> Result<(), CapacityError> {
-        Ok(self.push(b))
-    }
-    fn as_bytes(&self) -> &[u8] {
-        &self
+    fn truncate(&mut self, len: usize) {
+        self.truncate(len);
     }
     fn clear(&mut self) {
         self.clear();
     }
+    fn as_bytes(&self) -> &[u8] {
+        &self
+    }
+    fn len(&self) -> usize {
+        self.as_bytes().len()
+    }
 }
 
-pub struct Heapless<const TOPIC: usize, const PAYLOAD: usize, const BUF: usize>;
+pub struct Heapless<const TOPIC: usize, const PAYLOAD: usize>;
 
-impl<const TOPIC: usize, const PAYLOAD: usize, const BUF: usize> NatsConfig for Heapless<TOPIC, PAYLOAD, BUF> {
+impl<const TOPIC: usize, const PAYLOAD: usize> sealed::Sealed for Heapless<TOPIC, PAYLOAD> {}
+
+impl<const TOPIC: usize, const PAYLOAD: usize> NatsCollections for Heapless<TOPIC, PAYLOAD> {
     type Topic = heapless::String<TOPIC>;
-    type Msg = heapless::Vec<u8, PAYLOAD>;
-    type Buf = heapless::Vec<u8, BUF>;
-    // This checks that the buf is big enough to fit the maximum length of messages the client
-    // is able to receive
-    const _CHECK: () = assert!(max(PAYLOAD + DELIM.len(), "INFO ".len() + INFO_MAX_STR_LEN) == BUF,
-        "The length of BUF should exactly match max(PAYLOAD + 2; 470)");
+    type MsgBuf = heapless::Vec<u8, PAYLOAD>;
+    type SyncBuf = heapless::Vec<u8, INFO_MAX_STR_LEN>;
+    type AuthBuf = heapless::Vec<u8, AUTH_MAX_STR_LEN>;
 }
 
 impl<const TOPIC: usize> StrBuf for heapless::String<TOPIC> {
     fn try_from_str(s: &str) -> Result<Self, CapacityError> {
-        heapless::String::try_from(s)
+        heapless::String::try_from(s).map_err(|_| CapacityError::Str)
     }
     fn as_str(&self) -> &str {
         <&str>::from(self)
@@ -137,29 +163,35 @@ impl<const TOPIC: usize> StrBuf for heapless::String<TOPIC> {
 }
 
 impl<const PAYLOAD: usize> BytesBuf for heapless::Vec<u8, PAYLOAD> {
-    fn try_from_bytes(b: &[u8]) -> Result<Self, CapacityError> {
-        heapless::Vec::try_from(b)
+    fn extend_by(&mut self, len: usize) -> Result<&mut [u8], CapacityError> {
+        if self.capacity() - self.len() < len {
+            return Err(CapacityError::Bytes)
+        }
+        let before = self.len();
+        self.extend(core::iter::repeat_n(0, len));
+        Ok(&mut self[before..])
     }
-    fn len(&self) -> usize {
-        self.as_bytes().len()
-    }
-    fn push(&mut self, b: u8) -> Result<(), CapacityError> {
-        self.push(b).map_err(|_| CapacityError::default())
-    }
-    fn as_bytes(&self) -> &[u8] {
-        &self
+    fn truncate(&mut self, len: usize) {
+        self.truncate(len);
     }
     fn clear(&mut self) {
         self.clear();
     }
+    fn as_bytes(&self) -> &[u8] {
+        &self
+    }
+    fn len(&self) -> usize {
+        self.as_bytes().len()
+    }
 }
 
-
 pub struct NatsMsg<C>
-where C: NatsConfig {
+where
+    C: NatsCollections,
+{
     pub sid: usize,
     pub topic: C::Topic,
-    pub data: C::Msg,
+    pub data: C::MsgBuf,
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -175,7 +207,6 @@ pub struct NatsInfoMsg {
     pub proto: i32,
 }
 
-
 pub type MsgChannel<C, const N: usize> = channel::Channel<ThreadModeRawMutex, NatsMsg<C>, N>;
 type MsgSender<'a, C> = channel::SendDynamicSender<'a, NatsMsg<C>>;
 type MsgReceiver<'a, C> = channel::SendDynamicReceiver<'a, NatsMsg<C>>;
@@ -189,16 +220,14 @@ type CmdSender<'a, C> = channel::Sender<'a, ThreadModeRawMutex, InternalCmd<'a, 
 type CmdReceiver<'a, C> = channel::Receiver<'a, ThreadModeRawMutex, InternalCmd<'a, C>, 1>;
 
 enum InternalCmd<'a, C>
-where C: NatsConfig {
-    Pub(C::Topic, C::Msg),
-    Sub(C::Topic, MsgSender<'a, C>)
+where
+    C: NatsCollections,
+{
+    Pub(C::Topic, C::MsgBuf),
+    Sub(C::Topic, MsgSender<'a, C>),
 }
 
-mod sealed {
-    pub trait Sealed {}
-}
 pub trait NatsAuthenticator: serde::Serialize + sealed::Sealed {}
-
 
 #[derive(serde::Serialize)]
 pub struct NoopAuthenticator {
@@ -237,7 +266,7 @@ pub struct UserPwdAuthenticator {
     version: &'static str,
 }
 impl UserPwdAuthenticator {
-    fn new(user: &str, pwd: &str) -> Result<Self, CapacityError> {
+    fn new(user: &str, pwd: &str) -> Result<Self, HeaplessErr> {
         Ok(Self {
             verbose: false,
             pedantic: false,
@@ -265,7 +294,7 @@ pub struct TokenAuthenticator {
     version: &'static str,
 }
 impl TokenAuthenticator {
-    fn new(auth_token: &str) -> Result<Self, CapacityError> {
+    fn new(auth_token: &str) -> Result<Self, HeaplessErr> {
         Ok(Self {
             verbose: false,
             pedantic: false,
@@ -281,20 +310,24 @@ impl sealed::Sealed for TokenAuthenticator {}
 impl NatsAuthenticator for TokenAuthenticator {}
 
 pub struct Storage<'a, C>
-where C: NatsConfig {
+where
+    C: NatsCollections,
+{
     info_watch: InfoWatch,
     cmd_channel: CmdChannel<'a, C>,
 }
 impl<'a, C> Storage<'a, C>
-where C: NatsConfig {
+where
+    C: NatsCollections,
+{
     pub const fn new() -> Self {
-        // Force eval the check constant from each trait impl
-        let () = C::_CHECK;
-
         let info_watch = InfoWatch::new();
         let cmd_channel = CmdChannel::new();
-        
-        Self { info_watch, cmd_channel }
+
+        Self {
+            info_watch,
+            cmd_channel,
+        }
     }
 }
 
@@ -303,10 +336,18 @@ pub fn new_no_auth<'a, C, const N: usize>(
     socket: TcpSocket<'a>,
     storage: &'a Storage<'a, C>,
 ) -> (Client<'a, C, N>, Runner<'a, C, NoopAuthenticator, N>)
-where C: NatsConfig {
+where
+    C: NatsCollections,
+{
     let auth = NoopAuthenticator::new();
 
-    let runner = Runner::new(auth, address, socket, storage.info_watch.sender(), storage.cmd_channel.receiver());
+    let runner = Runner::new(
+        auth,
+        address,
+        socket,
+        storage.info_watch.sender(),
+        storage.cmd_channel.receiver(),
+    );
     let client = Client::new(storage);
 
     (client, runner)
@@ -318,11 +359,19 @@ pub fn new_with_user_pwd<'a, C, const N: usize>(
     address: SocketAddr,
     socket: TcpSocket<'a>,
     storage: &'a Storage<'a, C>,
-) -> Result<(Client<'a, C, N>, Runner<'a, C, UserPwdAuthenticator, N>), CapacityError>
-where C: NatsConfig {
+) -> Result<(Client<'a, C, N>, Runner<'a, C, UserPwdAuthenticator, N>), HeaplessErr>
+where
+    C: NatsCollections,
+{
     let auth = UserPwdAuthenticator::new(user, pwd)?;
 
-    let runner = Runner::new(auth, address, socket, storage.info_watch.sender(), storage.cmd_channel.receiver());
+    let runner = Runner::new(
+        auth,
+        address,
+        socket,
+        storage.info_watch.sender(),
+        storage.cmd_channel.receiver(),
+    );
     let client = Client::new(storage);
 
     Ok((client, runner))
@@ -333,14 +382,20 @@ pub fn new_with_auth_token<'a, C, const N: usize>(
     address: SocketAddr,
     socket: TcpSocket<'a>,
     storage: &'a Storage<'a, C>,
-) -> Result<(Client<'a, C, N>, Runner<'a, C, TokenAuthenticator, N>), CapacityError>
-where C: NatsConfig {
+) -> Result<(Client<'a, C, N>, Runner<'a, C, TokenAuthenticator, N>), HeaplessErr>
+where
+    C: NatsCollections,
+{
     let auth = TokenAuthenticator::new(auth_token)?;
 
-    let runner = Runner::new(auth, address, socket, storage.info_watch.sender(), storage.cmd_channel.receiver());
+    let runner = Runner::new(
+        auth,
+        address,
+        socket,
+        storage.info_watch.sender(),
+        storage.cmd_channel.receiver(),
+    );
     let client = Client::new(storage);
 
     Ok((client, runner))
 }
-
-
