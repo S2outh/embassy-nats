@@ -1,3 +1,23 @@
+//! This crate provides an embedded embassy net based implementation of the
+//! Nats client protocol: (https://docs.nats.io/reference/protocols/client).
+//! It allows for either the usage of [`alloc`] types if a global allocator is present
+//! (requires the *alloc* feature to be active) or using fixed size collections
+//! from the [`heapless`] crate. Furthermore defmt print statements are supported
+//! and can be enabled using the *defmt* feature.
+//!
+//! The entrypoint for this crate is one of three new() functions that can be used
+//! to connect to a Nats server using one of three supported authentication methods:
+//! No authentication, User/Password authentication and Token authentication.
+//! These new() functions will return a runner and a client. The runner only exposes an
+//! async run function that should be called in a dedicated task. To interface with
+//! the runner the client type exposes a set of methods for subscribing, publishing
+//! and receiving messages. If more than one client is necessary the client can safely be cloned.
+//! Each client keeps a separate list of subsciptions.
+//!
+//! For types that need to be statically available this crate exposes a [`Storage`]
+//! type that can be created in a const context. An immutable reference to such a storage
+//! should be provided to the respective new() function. Each separate runner will require
+//! a separate Storage.
 #![no_std]
 
 mod client;
@@ -8,6 +28,7 @@ use core::net::SocketAddr;
 pub use client::Client;
 use embassy_net::tcp::TcpSocket;
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel, watch};
+use portable_atomic::AtomicUsize;
 pub use runner::Runner;
 use thiserror::Error;
 
@@ -24,8 +45,11 @@ const fn max(a: usize, b: usize) -> usize {
 // These constants set sane but addmitedly arbitrary upper bounds
 // for the heapless string types in CONNECT and INFO messages
 
-// Maximum length of user and password for auth
+// Maximum length of user and password for authentication
 const USR_PASS_STR_SIZE: usize = 20;
+
+// Maximum length of an auth token
+const TOKEN_STR_SIZE: usize = 32;
 
 // server_id and server_name are up to 56 chars.
 // 64 is therefore a good upper bound for this metadata.
@@ -283,7 +307,6 @@ impl UserPwdAuthenticator {
 impl sealed::Sealed for UserPwdAuthenticator {}
 impl NatsAuthenticator for UserPwdAuthenticator {}
 
-const TOKEN_STR_SIZE: usize = 32;
 #[derive(serde::Serialize)]
 pub struct TokenAuthenticator {
     verbose: bool,
@@ -317,6 +340,7 @@ where
 {
     info_watch: InfoWatch,
     cmd_channel: CmdChannel<'a, C>,
+    sub_count: AtomicUsize,
 }
 impl<'a, C> Storage<'a, C>
 where
@@ -326,10 +350,12 @@ where
     pub const fn new() -> Self {
         let info_watch = InfoWatch::new();
         let cmd_channel = CmdChannel::new();
+        let sub_count = AtomicUsize::new(0);
 
         Self {
             info_watch,
             cmd_channel,
+            sub_count,
         }
     }
 }

@@ -1,14 +1,14 @@
-use core::pin::Pin;
+use core::{pin::Pin, sync::atomic::Ordering};
 
 use embassy_futures::select::select_slice;
 use embassy_sync::channel::DynamicReceiveFuture;
-use heapless::{CapacityError, vec::Vec};
 
 use crate::{
-    CmdSender, InfoReceiver, InternalCmd, MsgChannel, MsgReceiver, NatsCollections, NatsInfoMsg,
-    NatsMsg, Storage,
+    CapacityError, CmdSender, InfoReceiver, InternalCmd, MsgChannel, MsgReceiver, NatsCollections, NatsInfoMsg, NatsMsg, Storage,
 };
 
+/// The client struct can be used to interface with the runner.
+/// it can be cloned to receive new interfaces to the same runner.
 pub struct Client<'a, C, const N: usize>
 where
     C: NatsCollections,
@@ -17,7 +17,7 @@ where
     info_watch: InfoReceiver<'a>,
     cmd_channel: CmdSender<'a, C>,
 
-    sub_vec: Vec<MsgReceiver<'a, C>, N>,
+    sub_vec: heapless::Vec<MsgReceiver<'a, C>, N>,
 }
 impl<'a, C, const N: usize> Client<'a, C, N>
 where
@@ -30,11 +30,11 @@ where
             storage,
             info_watch,
             cmd_channel,
-            sub_vec: Vec::new(),
+            sub_vec: heapless::Vec::new(),
         }
     }
 
-    /// Publish a message with a given topic
+    /// Publish a message with a given topic 
     pub async fn publish(&mut self, topic: C::Topic, bytes: C::MsgBuf) {
         self.cmd_channel.send(InternalCmd::Pub(topic, bytes)).await;
     }
@@ -42,14 +42,20 @@ where
     /// Subscribe to a given topic. Since the lifetime of the message channel needs to outlive
     /// the entire NATS stack (which in practice almost always means 'static) the user will need to
     /// provide one.
+    ///
+    /// Returns a capacity error if the number of subscriptions the runner can handle are exausted
     pub async fn subscribe<const S: usize>(
         &mut self,
         topic: C::Topic,
         channel: &'a MsgChannel<C, S>,
     ) -> Result<(), CapacityError> {
+        if self.storage.sub_count.load(Ordering::Acquire) >= N {
+            return Err(CapacityError::Subscriptions);
+        }
+        self.storage.sub_count.fetch_add(1, Ordering::Release);
         self.sub_vec
             .push(channel.receiver().into())
-            .map_err(|_| CapacityError::default())?;
+            .map_err(|_| CapacityError::Subscriptions)?;
         self.cmd_channel
             .send(InternalCmd::Sub(topic, channel.sender().into()))
             .await;
@@ -62,7 +68,7 @@ where
             .sub_vec
             .iter()
             .map(|sub| sub.receive())
-            .collect::<Vec<DynamicReceiveFuture<'_, _>, N>>();
+            .collect::<heapless::Vec<DynamicReceiveFuture<'_, _>, N>>();
         select_slice(Pin::new(&mut futs[..])).await.0
     }
 
