@@ -78,7 +78,6 @@ pub struct SyncFramer<C: NatsCollections> {
 pub struct MsgFramer<C: NatsCollections> {
     buffer: C::MsgBuf,
     topic: C::Topic,
-    pos: usize,
     len: usize,
     sid: usize,
 }
@@ -222,7 +221,6 @@ impl<C: NatsCollections> MsgFramer<C> {
     fn new(topic: C::Topic, len: usize, sid: usize) -> Self {
         Self {
             buffer: C::MsgBuf::default(),
-            pos: 0,
             topic,
             len,
             sid,
@@ -232,15 +230,15 @@ impl<C: NatsCollections> MsgFramer<C> {
         &mut self,
         reader: &mut R,
     ) -> Result<InternalFrame<C>, FramerError<R::Error>> {
-        let slice = self.buffer.extend_by((self.len + DELIM.len()) - self.pos)?;
+        let pos = self.buffer.len();
+        let slice = self.buffer.extend_by((self.len + DELIM.len()) - pos)?;
         let n = reader.read(slice).await.map_err(|e| FramerError::Read(e))?;
         if n == 0 {
             return Err(FramerError::Disconnected);
         }
 
-        self.pos += n;
-        self.buffer.truncate(self.pos);
-        if self.pos >= (self.len + DELIM.len()) {
+        self.buffer.truncate(pos + n);
+        if self.buffer.len() >= (self.len + DELIM.len()) {
             // drop the delimeter from the end
             self.buffer.truncate(self.len);
             Ok(InternalFrame::MsgDone)

@@ -372,6 +372,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sizeprobe"
+version = "0.0.0"
+dependencies = [
+ "embassy-nats",
+ "embassy-net",
+ "heapless 0.9.3",
+]
+
+[[package]]
 name = "smoltcp"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

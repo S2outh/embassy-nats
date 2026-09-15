@@ -4,7 +4,8 @@ use embassy_futures::select::select_slice;
 use embassy_sync::channel::DynamicReceiveFuture;
 
 use crate::{
-    CapacityError, CmdSender, InfoReceiver, InternalCmd, MsgChannel, MsgReceiver, NatsCollections, NatsInfoMsg, NatsMsg, Storage,
+    CapacityError, CmdSender, InfoReceiver, InternalCmd, MsgChannel, MsgReceiver, NatsCollections,
+    NatsInfoMsg, NatsMsg, Storage,
 };
 
 /// The client struct can be used to interface with the runner.
@@ -34,14 +35,14 @@ where
         }
     }
 
-    /// Publish a message with a given topic 
+    /// Publish a message with a given topic
     pub async fn publish(&mut self, topic: C::Topic, bytes: C::MsgBuf) {
         self.cmd_channel.send(InternalCmd::Pub(topic, bytes)).await;
     }
 
     /// Subscribe to a given topic. Since the lifetime of the message channel needs to outlive
     /// the entire NATS stack (which in practice almost always means 'static) the user will need to
-    /// provide one.
+    /// provide one. Note that currently there is no method to unsubscribe.
     ///
     /// Returns a capacity error if the number of subscriptions the runner can handle are exausted
     pub async fn subscribe<const S: usize>(

@@ -103,13 +103,9 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
                 self.socket.write_all(&DELIM).await?;
 
                 // resubscribe to all existing subscriptions
-                let resubs: heapless::Vec<_, N> = self
-                    .subs
-                    .iter()
-                    .map(|(sid, topic, _)| (*sid, topic.clone()))
-                    .collect();
-                for (sid, topic) in resubs {
-                    self.subscribe(sid, topic).await?;
+                for i in 0..self.subs.len() {
+                    let (sid, topic, _) = &self.subs[i];
+                    self.subscribe(*sid, topic.clone()).await?;
                 }
 
                 // Update state
