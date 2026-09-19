@@ -73,6 +73,14 @@ where
         select_slice(Pin::new(&mut futs[..])).await.0
     }
 
+    /// try to return any currently pending messages in the
+    /// receive buffer
+    pub fn try_receive(&mut self) -> Option<NatsMsg<C>> {
+        self.sub_vec
+            .iter()
+            .find_map(|sub| sub.try_receive().ok())
+    }
+
     /// Get the contents of the latest INFO message received from the server
     pub async fn get_info(&mut self) -> Option<NatsInfoMsg> {
         self.info_watch.try_get()
