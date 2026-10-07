@@ -53,7 +53,7 @@ where
         if self.storage.sub_count.load(Ordering::Acquire) >= N {
             return Err(CapacityError::Subscriptions);
         }
-        self.storage.sub_count.fetch_add(1, Ordering::Release);
+        self.storage.sub_count.add(1, Ordering::Release);
         self.sub_vec
             .push(channel.receiver().into())
             .map_err(|_| CapacityError::Subscriptions)?;
@@ -62,6 +62,19 @@ where
             .await;
         Ok(())
     }
+
+    /// Unsubscribe from a topic. this function won't free up space in the channel list,
+    /// instead it will unsubscribe from the topic and keep the message open. The topic can then be
+    /// resubscribed using [`Client::resub()`]
+    pub async fn unsub(&mut self, topic: C::Topic) {
+        self.cmd_channel.send(InternalCmd::Unsub(topic)).await;
+    }
+
+    /// Resubscribe to a topic you were previously subscribed to.
+    pub async fn resub(&mut self, topic: C::Topic) {
+        self.cmd_channel.send(InternalCmd::Resub(topic)).await;
+    }
+
     /// Awaiting receive will await any message from all subscriptions of this client.
     /// If there are no subscriptions this will hang forever
     pub async fn receive(&mut self) -> NatsMsg<C> {
@@ -76,9 +89,7 @@ where
     /// try to return any currently pending messages in the
     /// receive buffer
     pub fn try_receive(&mut self) -> Option<NatsMsg<C>> {
-        self.sub_vec
-            .iter()
-            .find_map(|sub| sub.try_receive().ok())
+        self.sub_vec.iter().find_map(|sub| sub.try_receive().ok())
     }
 
     /// Get the contents of the latest INFO message received from the server

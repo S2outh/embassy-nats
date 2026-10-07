@@ -102,7 +102,7 @@ pub trait NatsCollections: sealed::Sealed {
 }
 
 /// A String buffer, containing methods to convert from and to &str
-pub trait StrBuf: Sized + Clone {
+pub trait StrBuf: Sized + Clone + PartialEq {
     fn try_from_str(s: &str) -> Result<Self, CapacityError>;
     fn as_str(&self) -> &str;
 }
@@ -250,6 +250,8 @@ where
 {
     Pub(C::Topic, C::MsgBuf),
     Sub(C::Topic, MsgSender<'a, C>),
+    Unsub(C::Topic),
+    Resub(C::Topic),
 }
 
 pub trait NatsAuthenticator: serde::Serialize + sealed::Sealed {}
