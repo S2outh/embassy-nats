@@ -10,9 +10,9 @@ defmt = [ "dep:defmt", "embassy-sync/defmt", "embassy-futures/defmt", "embassy-n
 
 [dependencies]
 
-embassy-sync = { version = "0.8.0" }
-embassy-futures = { version = "0.1.2" }
-embassy-net = { version = "0.9.1", features = ["tcp", "dhcpv4", "proto-ipv4", "proto-ipv6" ] }
+embassy-sync = { git = "https://github.com/Eleocraft/embassy.git", branch = "embassy_boot_crypto" }
+embassy-futures = { git = "https://github.com/Eleocraft/embassy.git", branch = "embassy_boot_crypto" }
+embassy-net = { git = "https://github.com/Eleocraft/embassy.git", branch = "embassy_boot_crypto", features = ["tcp", "dhcpv4", "ipv4", "ipv6" ] }
 embedded-io-async = "0.7.0"
 
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }

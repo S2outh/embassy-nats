@@ -365,7 +365,7 @@ where
 /// Create a new embassy runner/client pair without authentication
 pub fn new_no_auth<'a, C, const N: usize>(
     address: SocketAddr,
-    socket: TcpSocket<'a>,
+    socket: TcpSocket<'a, 'a>,
     storage: &'a Storage<'a, C>,
 ) -> (Client<'a, C, N>, Runner<'a, C, NoopAuthenticator, N>)
 where
@@ -390,7 +390,7 @@ pub fn new_with_user_pwd<'a, C, const N: usize>(
     user: &str,
     pwd: &str,
     address: SocketAddr,
-    socket: TcpSocket<'a>,
+    socket: TcpSocket<'a, 'a>,
     storage: &'a Storage<'a, C>,
 ) -> Result<(Client<'a, C, N>, Runner<'a, C, UserPwdAuthenticator, N>), CapacityError>
 where
@@ -414,7 +414,7 @@ where
 pub fn new_with_auth_token<'a, C, const N: usize>(
     auth_token: &str,
     address: SocketAddr,
-    socket: TcpSocket<'a>,
+    socket: TcpSocket<'a, 'a>,
     storage: &'a Storage<'a, C>,
 ) -> Result<(Client<'a, C, N>, Runner<'a, C, TokenAuthenticator, N>), CapacityError>
 where

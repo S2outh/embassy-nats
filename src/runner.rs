@@ -66,7 +66,7 @@ pub struct Runner<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> 
     auth: A,
     state: State,
     address: SocketAddr,
-    socket: TcpSocket<'a>,
+    socket: TcpSocket<'a, 'a>,
 
     info_watch: InfoSender<'a>,
     cmd_channel: CmdReceiver<'a, C>,
@@ -78,7 +78,7 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
     pub(crate) fn new(
         auth: A,
         address: SocketAddr,
-        socket: TcpSocket<'a>,
+        socket: TcpSocket<'a, 'a>,
         info_watch: InfoSender<'a>,
         cmd_channel: CmdReceiver<'a, C>,
     ) -> Self {
