@@ -9,6 +9,7 @@ mod framer;
 use framer::Frame;
 use framer::Framer;
 
+use crate::runner::framer::FramerError;
 use crate::{
     AUTH_JSON_MAX_LEN, BytesBuf, CapacityError, CmdReceiver, DELIM, InfoSender, InternalCmd,
     MsgSender, NatsAuthenticator, NatsCollections, StrBuf, U32_MAX_STR_LEN,
@@ -29,15 +30,36 @@ enum State {
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Error)]
-enum Error<R> {
-    #[error("Write error: {0}")]
-    Write(#[from] tcp::Error),
-    #[error("Framer error: {0}")]
-    Framer(#[from] framer::FramerError<R>),
+enum Error {
+    #[error("Disconnected")]
+    Disconnected,
+    #[error("Tcp error: {0}")]
+    Tcp(#[from] tcp::Error),
     #[error("Capacity of collection {0} not sufficient for operation")]
     Capacity(#[from] CapacityError),
     #[error("Json serialization error {0}")]
     Ser(#[from] serde_json_core::ser::Error),
+    #[error("Json deserialization error {0}")]
+    Deser(#[from] serde_json_core::de::Error),
+    #[error("Invalid utf8")]
+    Utf8,
+    #[error("Invalid header")]
+    Header,
+}
+
+type Result<T> = core::result::Result<T, Error>;
+
+impl From<FramerError<tcp::Error>> for Error {
+    fn from(value: FramerError<tcp::Error>) -> Self {
+        match value {
+            FramerError::Disconnected => Error::Disconnected,
+            FramerError::Read(e) => Error::Tcp(e),
+            FramerError::Capacity(e) => Error::Capacity(e),
+            FramerError::Deser(e) => Error::Deser(e),
+            FramerError::Utf8 => Error::Utf8,
+            FramerError::Header => Error::Header,
+        }
+    }
 }
 
 pub struct Runner<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> {
@@ -79,7 +101,7 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
         let _ = self.socket.flush().await;
         self.state = State::Disconnected;
     }
-    async fn read(&mut self) -> Result<(), Error<tcp::Error>> {
+    async fn read(&mut self) -> Result<()> {
         let Some(frame) = self.framer.frame(&mut self.socket).await? else {
             return Ok(());
         };
@@ -137,7 +159,7 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
 
         Ok(())
     }
-    async fn subscribe(&mut self, sid: usize, topic: C::Topic) -> Result<(), Error<tcp::Error>> {
+    async fn subscribe(&mut self, sid: usize, topic: C::Topic) -> Result<()> {
         self.socket.write_all(b"SUB ").await?;
         self.socket.write_all(topic.as_str().as_bytes()).await?;
         self.socket.write_all(b" ").await?;
@@ -151,7 +173,7 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
         self.socket.write_all(&DELIM).await?;
         Ok(())
     }
-    async fn unsubscribe(&mut self, sid: usize) -> Result<(), Error<tcp::Error>> {
+    async fn unsubscribe(&mut self, sid: usize) -> Result<()> {
         self.socket.write_all(b"UNSUB ").await?;
         self.socket
             .write_all(
@@ -163,7 +185,7 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
         self.socket.write_all(&DELIM).await?;
         Ok(())
     }
-    async fn publish(&mut self, topic: C::Topic, data: C::MsgBuf) -> Result<(), Error<tcp::Error>> {
+    async fn publish(&mut self, topic: C::Topic, data: C::MsgBuf) -> Result<()> {
         let data = data.as_bytes();
 
         // Header
@@ -185,11 +207,7 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
 
         Ok(())
     }
-    async fn register_sub(
-        &mut self,
-        topic: C::Topic,
-        channel: MsgSender<'a, C>,
-    ) -> Result<(), Error<tcp::Error>> {
+    async fn register_sub(&mut self, topic: C::Topic, channel: MsgSender<'a, C>) -> Result<()> {
         if self
             .subs
             .iter_mut()
@@ -208,7 +226,7 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
 
         self.subscribe(sid, topic).await
     }
-    async fn deactivate(&mut self, topic: C::Topic) -> Result<(), Error<tcp::Error>> {
+    async fn deactivate(&mut self, topic: C::Topic) -> Result<()> {
         let sid = if let Some((sid, _, _, active)) =
             self.subs.iter_mut().find(|(_, tp, _, _)| tp == &topic)
         {
@@ -223,7 +241,7 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
 
         self.unsubscribe(sid).await
     }
-    async fn reactivate(&mut self, topic: C::Topic) -> Result<(), Error<tcp::Error>> {
+    async fn reactivate(&mut self, topic: C::Topic) -> Result<()> {
         let sid = if let Some((sid, _, _, active)) =
             self.subs.iter_mut().find(|(_, tp, _, _)| tp == &topic)
         {
@@ -252,13 +270,10 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
         {
             defmt!(error!("nats error: {}", e));
             match e {
-                // If framer had a connection issue disconnect
-                Error::Framer(framer::FramerError::Disconnected)
-                | Error::Framer(framer::FramerError::Read(_)) => self.disconnect().await,
-                // else reset framer
-                Error::Framer(_) => self.framer = Framer::new(),
-                // otherwise also disconnect
-                _ => self.disconnect().await,
+                // If we had a connection issue disconnect
+                Error::Disconnected | Error::Tcp(_) => self.disconnect().await,
+                // otherwise reset framer
+                _ => self.framer = Framer::new(),
             }
         };
     }
