@@ -62,6 +62,13 @@ impl From<FramerError<tcp::Error>> for Error {
     }
 }
 
+struct Subscription<'a, C: NatsCollections> {
+    sid: usize,
+    topic: C::Topic,
+    channel: MsgSender<'a, C>,
+    active: bool
+}
+
 pub struct Runner<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> {
     auth: A,
     state: State,
@@ -71,7 +78,7 @@ pub struct Runner<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> 
     info_watch: InfoSender<'a>,
     cmd_channel: CmdReceiver<'a, C>,
 
-    subs: heapless::Vec<(usize, C::Topic, MsgSender<'a, C>, bool), N>,
+    subs: heapless::Vec<Subscription<'a, C>, N>,
     framer: Framer<C>,
 }
 impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C, A, N> {
@@ -126,7 +133,7 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
 
                 // resubscribe to all existing subscriptions
                 for i in 0..self.subs.len() {
-                    let (sid, topic, _, active) = &self.subs[i];
+                    let Subscription { sid, topic, active, .. } = &self.subs[i];
                     if *active {
                         self.subscribe(*sid, topic.clone()).await?;
                     }
@@ -140,11 +147,11 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
             }
             Frame::Ok => (),
             Frame::Msg(nats_msg) => {
-                if let Some((sid, _, ch, active)) =
-                    self.subs.iter().find(|(sid, _, _, _)| sid == &nats_msg.sid)
+                if let Some(Subscription { sid, channel, active, .. }) =
+                    self.subs.iter().find(|s| s.sid == nats_msg.sid)
                 {
                     if *active {
-                        ch.send(nats_msg).await;
+                        channel.send(nats_msg).await;
                     } else {
                         self.unsubscribe(*sid).await?;
                     }
@@ -207,11 +214,11 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
 
         Ok(())
     }
-    async fn register_sub(&mut self, topic: C::Topic, channel: MsgSender<'a, C>) -> Result<()> {
+    async fn register_sub(&mut self, topic: C::Topic, channel: MsgSender<'a, C>, active: bool) -> Result<()> {
         if self
             .subs
             .iter_mut()
-            .find(|(_, tp, _, _)| tp == &topic)
+            .find(|s| s.topic == topic)
             .is_some()
         {
             defmt!(error!("can't subscribe to a topic twice"));
@@ -221,14 +228,18 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
         let sid = self.subs.len();
 
         self.subs
-            .push((sid, topic.clone(), channel, true))
+            .push(Subscription { sid, topic: topic.clone(), channel, active })
             .map_err(|_| CapacityError::Subscriptions)?;
 
-        self.subscribe(sid, topic).await
+        if active {
+            self.subscribe(sid, topic).await?;
+        }
+
+        Ok(())
     }
     async fn deactivate(&mut self, topic: C::Topic) -> Result<()> {
-        let sid = if let Some((sid, _, _, active)) =
-            self.subs.iter_mut().find(|(_, tp, _, _)| tp == &topic)
+        let sid = if let Some(Subscription { sid, active, .. }) =
+            self.subs.iter_mut().find(|s| s.topic == topic)
         {
             *active = false;
             *sid
@@ -242,8 +253,8 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
         self.unsubscribe(sid).await
     }
     async fn reactivate(&mut self, topic: C::Topic) -> Result<()> {
-        let sid = if let Some((sid, _, _, active)) =
-            self.subs.iter_mut().find(|(_, tp, _, _)| tp == &topic)
+        let sid = if let Some(Subscription { sid, active, .. }) =
+            self.subs.iter_mut().find(|s| s.topic == topic)
         {
             *active = true;
             *sid
@@ -261,7 +272,7 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
             match select(self.socket.wait_read_ready(), self.cmd_channel.receive()).await {
                 Either::First(()) => self.read().await,
                 Either::Second(cmd) => match cmd {
-                    InternalCmd::Sub(topic, ch) => self.register_sub(topic, ch).await,
+                    InternalCmd::Sub(topic, ch, active) => self.register_sub(topic, ch, active).await,
                     InternalCmd::Pub(topic, data) => self.publish(topic, data).await,
                     InternalCmd::Unsub(topic) => self.deactivate(topic).await,
                     InternalCmd::Resub(topic) => self.reactivate(topic).await,

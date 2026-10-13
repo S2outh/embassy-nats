@@ -42,7 +42,7 @@ where
 
     /// Subscribe to a given topic. Since the lifetime of the message channel needs to outlive
     /// the entire NATS stack (which in practice almost always means 'static) the user will need to
-    /// provide one. Note that currently there is no method to unsubscribe.
+    /// provide one.
     ///
     /// Returns a capacity error if the number of subscriptions the runner can handle are exausted
     pub async fn subscribe<const S: usize>(
@@ -58,7 +58,31 @@ where
             .push(channel.receiver().into())
             .map_err(|_| CapacityError::Subscriptions)?;
         self.cmd_channel
-            .send(InternalCmd::Sub(topic, channel.sender().into()))
+            .send(InternalCmd::Sub(topic, channel.sender().into(), true))
+            .await;
+        Ok(())
+    }
+
+    /// Register to a given topic (without actually subscribing).
+    /// Since the lifetime of the message channel needs to outlive
+    /// the entire NATS stack (which in practice almost always means 'static) the user will need to
+    /// provide one.
+    ///
+    /// Returns a capacity error if the number of subscriptions the runner can handle are exausted
+    pub async fn register<const S: usize>(
+        &mut self,
+        topic: C::Topic,
+        channel: &'a MsgChannel<C, S>,
+    ) -> Result<(), CapacityError> {
+        if self.storage.sub_count.load(Ordering::Acquire) >= N {
+            return Err(CapacityError::Subscriptions);
+        }
+        self.storage.sub_count.add(1, Ordering::Release);
+        self.sub_vec
+            .push(channel.receiver().into())
+            .map_err(|_| CapacityError::Subscriptions)?;
+        self.cmd_channel
+            .send(InternalCmd::Sub(topic, channel.sender().into(), false))
             .await;
         Ok(())
     }

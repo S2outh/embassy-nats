@@ -249,7 +249,7 @@ where
     C: NatsCollections,
 {
     Pub(C::Topic, C::MsgBuf),
-    Sub(C::Topic, MsgSender<'a, C>),
+    Sub(C::Topic, MsgSender<'a, C>, bool),
     Unsub(C::Topic),
     Resub(C::Topic),
 }
