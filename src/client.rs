@@ -76,6 +76,15 @@ where
         Ok(())
     }
 
+    /// Unsubscribe from all topics
+    pub async fn unsub_all(&mut self) {
+        for (topic, _) in &self.sub_vec {
+            self.cmd_channel.send(InternalCmd::Unsub(topic.clone())).await;
+        }
+        self.storage.sub_count.sub(self.sub_vec.len(), Ordering::Release);
+        self.sub_vec.clear();
+    }
+
     /// Awaiting receive will await any message from all subscriptions of this client.
     /// If there are no subscriptions this will hang forever
     pub async fn receive(&mut self) -> NatsMsg<C> {
