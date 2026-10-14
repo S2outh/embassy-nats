@@ -8,6 +8,10 @@ use crate::{
     NatsInfoMsg, NatsMsg, Storage,
 };
 
+#[derive(Debug, thiserror::Error)]
+#[error("Not subscribed to topic")]
+pub struct NotSubscribed;
+
 /// The client struct can be used to interface with the runner.
 /// it can be cloned to receive new interfaces to the same runner.
 pub struct Client<'a, C, const N: usize>
@@ -18,7 +22,7 @@ where
     info_watch: InfoReceiver<'a>,
     cmd_channel: CmdSender<'a, C>,
 
-    sub_vec: heapless::Vec<MsgReceiver<'a, C>, N>,
+    sub_vec: heapless::Vec<(C::Topic, MsgReceiver<'a, C>), N>,
 }
 impl<'a, C, const N: usize> Client<'a, C, N>
 where
@@ -55,48 +59,21 @@ where
         }
         self.storage.sub_count.add(1, Ordering::Release);
         self.sub_vec
-            .push(channel.receiver().into())
+            .push((topic.clone(), channel.receiver().into()))
             .map_err(|_| CapacityError::Subscriptions)?;
         self.cmd_channel
-            .send(InternalCmd::Sub(topic, channel.sender().into(), true))
+            .send(InternalCmd::Sub(topic, channel.sender().into()))
             .await;
         Ok(())
     }
 
-    /// Register to a given topic (without actually subscribing).
-    /// Since the lifetime of the message channel needs to outlive
-    /// the entire NATS stack (which in practice almost always means 'static) the user will need to
-    /// provide one.
-    ///
-    /// Returns a capacity error if the number of subscriptions the runner can handle are exausted
-    pub async fn register<const S: usize>(
-        &mut self,
-        topic: C::Topic,
-        channel: &'a MsgChannel<C, S>,
-    ) -> Result<(), CapacityError> {
-        if self.storage.sub_count.load(Ordering::Acquire) >= N {
-            return Err(CapacityError::Subscriptions);
-        }
-        self.storage.sub_count.add(1, Ordering::Release);
-        self.sub_vec
-            .push(channel.receiver().into())
-            .map_err(|_| CapacityError::Subscriptions)?;
-        self.cmd_channel
-            .send(InternalCmd::Sub(topic, channel.sender().into(), false))
-            .await;
-        Ok(())
-    }
-
-    /// Unsubscribe from a topic. this function won't free up space in the channel list,
-    /// instead it will unsubscribe from the topic and keep the message open. The topic can then be
-    /// resubscribed using [`Client::resub()`]
-    pub async fn unsub(&mut self, topic: C::Topic) {
+    /// Unsubscribe from a topic, freeing the channel for future use
+    pub async fn unsub(&mut self, topic: C::Topic) -> Result<(), NotSubscribed> {
+        let i = self.sub_vec.iter().position(|(t, _)| t == &topic).ok_or(NotSubscribed)?;
         self.cmd_channel.send(InternalCmd::Unsub(topic)).await;
-    }
-
-    /// Resubscribe to a topic you were previously subscribed to.
-    pub async fn resub(&mut self, topic: C::Topic) {
-        self.cmd_channel.send(InternalCmd::Resub(topic)).await;
+        self.sub_vec.swap_remove(i);
+        self.storage.sub_count.sub(1, Ordering::Release);
+        Ok(())
     }
 
     /// Awaiting receive will await any message from all subscriptions of this client.
@@ -105,7 +82,7 @@ where
         let mut futs = self
             .sub_vec
             .iter()
-            .map(|sub| sub.receive())
+            .map(|(_, sub)| sub.receive())
             .collect::<heapless::Vec<DynamicReceiveFuture<'_, _>, N>>();
         select_slice(Pin::new(&mut futs[..])).await.0
     }
@@ -113,7 +90,7 @@ where
     /// try to return any currently pending messages in the
     /// receive buffer
     pub fn try_receive(&mut self) -> Option<NatsMsg<C>> {
-        self.sub_vec.iter().find_map(|sub| sub.try_receive().ok())
+        self.sub_vec.iter().find_map(|(_, sub)| sub.try_receive().ok())
     }
 
     /// Get the contents of the latest INFO message received from the server
@@ -127,5 +104,19 @@ where
 {
     fn clone(&self) -> Self {
         Client::new(self.storage)
+    }
+}
+
+impl<'a, C, const N: usize> Drop for Client<'a, C, N>
+where
+    C: NatsCollections,
+{
+    fn drop(&mut self) {
+        for (topic, _) in &self.sub_vec {
+            if self.cmd_channel.try_send(InternalCmd::Unsub(topic.clone())).is_err() {
+                panic!("DO NOT DROP CLIENTS WITH ACTIVE SUBSCRIPTIONS")
+            }
+            self.storage.sub_count.sub(1, Ordering::Release);
+        }
     }
 }

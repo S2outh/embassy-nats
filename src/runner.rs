@@ -66,7 +66,6 @@ struct Subscription<'a, C: NatsCollections> {
     sid: usize,
     topic: C::Topic,
     channel: MsgSender<'a, C>,
-    active: bool
 }
 
 pub struct Runner<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> {
@@ -79,6 +78,7 @@ pub struct Runner<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> 
     cmd_channel: CmdReceiver<'a, C>,
 
     subs: heapless::Vec<Subscription<'a, C>, N>,
+    sub_sid: usize,
     framer: Framer<C>,
 }
 impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C, A, N> {
@@ -100,6 +100,7 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
             cmd_channel,
 
             subs: heapless::Vec::new(),
+            sub_sid: 0,
             framer: Framer::new(),
         }
     }
@@ -133,10 +134,8 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
 
                 // resubscribe to all existing subscriptions
                 for i in 0..self.subs.len() {
-                    let Subscription { sid, topic, active, .. } = &self.subs[i];
-                    if *active {
-                        self.subscribe(*sid, topic.clone()).await?;
-                    }
+                    let Subscription { sid, topic, .. } = &self.subs[i];
+                    self.subscribe(*sid, topic.clone()).await?;
                 }
 
                 // Update state
@@ -147,14 +146,10 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
             }
             Frame::Ok => (),
             Frame::Msg(nats_msg) => {
-                if let Some(Subscription { sid, channel, active, .. }) =
+                if let Some(Subscription { channel, .. }) =
                     self.subs.iter().find(|s| s.sid == nats_msg.sid)
                 {
-                    if *active {
-                        channel.send(nats_msg).await;
-                    } else {
-                        self.unsubscribe(*sid).await?;
-                    }
+                    channel.send(nats_msg).await;
                 } else {
                     defmt!(error!(
                         "Receiving message with no endpoint, unsubscribing..."
@@ -214,68 +209,52 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
 
         Ok(())
     }
-    async fn register_sub(&mut self, topic: C::Topic, channel: MsgSender<'a, C>, active: bool) -> Result<()> {
+    async fn register_sub(&mut self, topic: C::Topic, channel: MsgSender<'a, C>) -> Result<()> {
         if self
             .subs
             .iter_mut()
             .find(|s| s.topic == topic)
             .is_some()
         {
-            defmt!(error!("can't subscribe to a topic twice"));
+            defmt!(warn!("can't subscribe to a topic twice"));
             return Ok(());
         }
 
-        let sid = self.subs.len();
+        let sid = self.sub_sid;
+        self.sub_sid += 1;
 
         self.subs
-            .push(Subscription { sid, topic: topic.clone(), channel, active })
+            .push(Subscription { sid, topic: topic.clone(), channel})
             .map_err(|_| CapacityError::Subscriptions)?;
 
-        if active {
-            self.subscribe(sid, topic).await?;
-        }
+        self.subscribe(sid, topic).await?;
 
         Ok(())
     }
-    async fn deactivate(&mut self, topic: C::Topic) -> Result<()> {
-        let sid = if let Some(Subscription { sid, active, .. }) =
-            self.subs.iter_mut().find(|s| s.topic == topic)
-        {
-            *active = false;
-            *sid
-        } else {
-            defmt!(error!(
+    async fn deregister_sub(&mut self, topic: C::Topic) -> Result<()> {
+        let Some((i, Subscription { sid, .. })) =
+            self.subs.iter().enumerate().find(|(_, s)| s.topic == topic)
+        else {
+            defmt!(warn!(
                 "can't unsubscribe, as no subscription was registered"
             ));
             return Ok(());
         };
 
-        self.unsubscribe(sid).await
-    }
-    async fn reactivate(&mut self, topic: C::Topic) -> Result<()> {
-        let sid = if let Some(Subscription { sid, active, .. }) =
-            self.subs.iter_mut().find(|s| s.topic == topic)
-        {
-            *active = true;
-            *sid
-        } else {
-            defmt!(error!(
-                "can't resubscribe, as no subscription was registered"
-            ));
-            return Ok(());
-        };
+        let sid = *sid;
+        self.subs.swap_remove(i);
+        self.unsubscribe(sid).await?;
 
-        self.subscribe(sid, topic).await
+        Ok(())
     }
     async fn run_connected(&mut self) {
         if let Err(e) =
             match select(self.socket.wait_read_ready(), self.cmd_channel.receive()).await {
                 Either::First(()) => self.read().await,
                 Either::Second(cmd) => match cmd {
-                    InternalCmd::Sub(topic, ch, active) => self.register_sub(topic, ch, active).await,
+                    InternalCmd::Sub(topic, ch) => self.register_sub(topic, ch).await,
                     InternalCmd::Pub(topic, data) => self.publish(topic, data).await,
-                    InternalCmd::Unsub(topic) => self.deactivate(topic).await,
-                    InternalCmd::Resub(topic) => self.reactivate(topic).await,
+                    InternalCmd::Unsub(topic) => self.deregister_sub(topic).await,
                 },
             }
         {

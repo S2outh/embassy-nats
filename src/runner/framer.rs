@@ -254,3 +254,168 @@ impl<C: NatsCollections> MsgFramer<C> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+
+    extern crate std;
+    use super::*;
+    use crate::Heapless;
+    use embassy_futures::block_on;
+    use std::collections::VecDeque;
+    use std::vec::Vec;
+
+    type C = Heapless<32, 64>;
+
+    /// A reader yielding the provided chunks. A single read never crosses a chunk
+    /// boundary, which simulates data arriving in separate packets.
+    /// Once all chunks are consumed, reads return 0 (disconnected).
+    struct Provider {
+        data: VecDeque<Vec<u8>>,
+    }
+
+    impl Provider {
+        fn new(chunks: &[&[u8]]) -> Self {
+            Self {
+                data: chunks.iter().map(|c| c.to_vec()).collect(),
+            }
+        }
+    }
+
+    impl embedded_io_async::ErrorType for Provider {
+        type Error = core::convert::Infallible;
+    }
+
+    impl Read for Provider {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            let Some(data) = self.data.front_mut() else {
+                return Ok(0);
+            };
+            let len = buf.len().min(data.len());
+            buf[..len].copy_from_slice(&data[..len]);
+            data.drain(..len);
+            if data.is_empty() {
+                self.data.pop_front();
+            }
+            Ok(len)
+        }
+    }
+
+    /// Call frame() until a frame is produced or an error occurs.
+    fn next_frame(
+        framer: &mut Framer<C>,
+        provider: &mut Provider,
+    ) -> Result<Frame<C>, FramerError<core::convert::Infallible>> {
+        loop {
+            if let Some(frame) = block_on(framer.frame(provider))? {
+                return Ok(frame);
+            }
+        }
+    }
+
+    #[test]
+    fn ping_split() {
+        let mut framer = Framer::new();
+        let mut provider = Provider::new(&[b"PI", b"NG\r", b"\n"]);
+        assert!(matches!(next_frame(&mut framer, &mut provider), Ok(Frame::Ping)));
+    }
+
+    #[test]
+    fn ok_and_err() {
+        let mut framer = Framer::new();
+        let mut provider = Provider::new(&[b"+OK\r\n-ERR 'Unknown Protocol Operation'\r\n"]);
+        assert!(matches!(next_frame(&mut framer, &mut provider), Ok(Frame::Ok)));
+        assert!(matches!(next_frame(&mut framer, &mut provider), Ok(Frame::Err)));
+    }
+
+    #[test]
+    fn info() {
+        let mut framer = Framer::new();
+        let mut provider = Provider::new(&[
+            br#"INFO {"server_id":"id","server_name":"name","version":"2.10.0","go":"go1.22","host":"0.0.0.0","port":4222,"headers":true,"max_payload":1048576,"proto":1}"#,
+            b"\r\n",
+        ]);
+        let Ok(Frame::Info(info)) = next_frame(&mut framer, &mut provider) else {
+            panic!("expected INFO frame");
+        };
+        assert_eq!(info.server_name.as_str(), "name");
+        assert_eq!(info.port, 4222);
+        assert_eq!(info.max_payload, 1048576);
+    }
+
+    #[test]
+    fn msg() {
+        let mut framer = Framer::new();
+        let mut provider = Provider::new(&[b"MSG foo.bar 9 11\r\nhello", b" world\r\n", b"PING\r\n"]);
+        let Ok(Frame::Msg(msg)) = next_frame(&mut framer, &mut provider) else {
+            panic!("expected MSG frame");
+        };
+        assert_eq!(msg.topic.as_str(), "foo.bar");
+        assert_eq!(msg.sid, 9);
+        assert_eq!(msg.data.as_bytes(), b"hello world");
+        // framer is back in sync state afterwards
+        assert!(matches!(next_frame(&mut framer, &mut provider), Ok(Frame::Ping)));
+    }
+
+    #[test]
+    fn msg_with_reply_to_and_crlf_payload() {
+        let mut framer = Framer::new();
+        let mut provider = Provider::new(&[b"MSG foo 1 _INBOX.abc 4\r\na\r\nb\r\n"]);
+        let Ok(Frame::Msg(msg)) = next_frame(&mut framer, &mut provider) else {
+            panic!("expected MSG frame");
+        };
+        assert_eq!(msg.topic.as_str(), "foo");
+        assert_eq!(msg.sid, 1);
+        assert_eq!(msg.data.as_bytes(), b"a\r\nb");
+    }
+
+    #[test]
+    fn empty_msg() {
+        let mut framer = Framer::new();
+        let mut provider = Provider::new(&[b"MSG foo 2 0\r\n\r\n"]);
+        let Ok(Frame::Msg(msg)) = next_frame(&mut framer, &mut provider) else {
+            panic!("expected MSG frame");
+        };
+        assert_eq!(msg.data.as_bytes(), b"");
+    }
+
+    #[test]
+    fn msg_too_large() {
+        let mut framer = Framer::new();
+        let mut provider = Provider::new(&[b"MSG foo 2 100\r\n"]);
+        assert!(matches!(
+            next_frame(&mut framer, &mut provider),
+            Err(FramerError::Capacity(CapacityError::Bytes))
+        ));
+    }
+
+    #[test]
+    fn unknown_cmd() {
+        let mut framer = Framer::new();
+        let mut provider = Provider::new(&[b"FOO bar\r\n"]);
+        assert!(matches!(
+            next_frame(&mut framer, &mut provider),
+            Err(FramerError::Header)
+        ));
+    }
+
+    #[test]
+    fn invalid_msg_header() {
+        let mut framer = Framer::new();
+        let mut provider = Provider::new(&[b"MSG foo x 3\r\n"]);
+        assert!(matches!(
+            next_frame(&mut framer, &mut provider),
+            Err(FramerError::Header)
+        ));
+    }
+
+    #[test]
+    fn disconnected() {
+        let mut framer = Framer::new();
+        let mut provider = Provider::new(&[b"PIN"]);
+        assert!(matches!(
+            next_frame(&mut framer, &mut provider),
+            Err(FramerError::Disconnected)
+        ));
+    }
+}
