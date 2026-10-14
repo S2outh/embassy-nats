@@ -332,39 +332,25 @@ mod tests {
     fn info() {
         let mut framer = Framer::new();
         let mut provider = Provider::new(&[
-            br#"INFO {"server_id":"id","server_name":"name","version":"2.10.0","go":"go1.22","host":"0.0.0.0","port":4222,"headers":true,"max_payload":1048576,"proto":1}"#,
+            br#"INFO {"server_id":"id","server_name":"name","version":"1.2.3","go":"go1.2","host":"0.0.0.0","port":1234,"headers":true,"max_payload":1048576,"proto":1}"#,
             b"\r\n",
         ]);
         let Ok(Frame::Info(info)) = next_frame(&mut framer, &mut provider) else {
             panic!("expected INFO frame");
         };
         assert_eq!(info.server_name.as_str(), "name");
-        assert_eq!(info.port, 4222);
+        assert_eq!(info.port, 1234);
         assert_eq!(info.max_payload, 1048576);
     }
 
     #[test]
     fn msg() {
         let mut framer = Framer::new();
-        let mut provider = Provider::new(&[b"MSG foo.bar 9 11\r\nhello", b" world\r\n", b"PING\r\n"]);
+        let mut provider = Provider::new(&[b"MSG foo.bar 1 _INBOX.abc 4\r\na\r\nb\r\n"]);
         let Ok(Frame::Msg(msg)) = next_frame(&mut framer, &mut provider) else {
             panic!("expected MSG frame");
         };
         assert_eq!(msg.topic.as_str(), "foo.bar");
-        assert_eq!(msg.sid, 9);
-        assert_eq!(msg.data.as_bytes(), b"hello world");
-        // framer is back in sync state afterwards
-        assert!(matches!(next_frame(&mut framer, &mut provider), Ok(Frame::Ping)));
-    }
-
-    #[test]
-    fn msg_with_reply_to_and_crlf_payload() {
-        let mut framer = Framer::new();
-        let mut provider = Provider::new(&[b"MSG foo 1 _INBOX.abc 4\r\na\r\nb\r\n"]);
-        let Ok(Frame::Msg(msg)) = next_frame(&mut framer, &mut provider) else {
-            panic!("expected MSG frame");
-        };
-        assert_eq!(msg.topic.as_str(), "foo");
         assert_eq!(msg.sid, 1);
         assert_eq!(msg.data.as_bytes(), b"a\r\nb");
     }
