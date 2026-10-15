@@ -21,6 +21,7 @@
 #![no_std]
 
 mod client;
+mod msg_channel;
 mod runner;
 
 use core::net::SocketAddr;
@@ -28,6 +29,8 @@ use core::net::SocketAddr;
 pub use client::*;
 use embassy_net::tcp::TcpSocket;
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel, watch};
+use msg_channel::*;
+pub use msg_channel::{AlreadyOpen, MsgChannel};
 use portable_atomic::AtomicUsize;
 pub use runner::Runner;
 use thiserror::Error;
@@ -232,18 +235,16 @@ pub struct NatsInfoMsg {
     pub proto: i32,
 }
 
-pub type MsgChannel<C, const N: usize> = channel::Channel<ThreadModeRawMutex, NatsMsg<C>, N>;
-type MsgSender<'a, C> = channel::SendDynamicSender<'a, NatsMsg<C>>;
-type MsgReceiver<'a, C> = channel::SendDynamicReceiver<'a, NatsMsg<C>>;
-
 type InfoWatch = watch::Watch<ThreadModeRawMutex, NatsInfoMsg, 0>;
 type InfoSender<'a> = watch::Sender<'a, ThreadModeRawMutex, NatsInfoMsg, 0>;
 type InfoReceiver<'a> = watch::DynAnonReceiver<'a, NatsInfoMsg>;
 
 const CMD_CHANNEL_SIZE: usize = 3;
 type CmdChannel<'a, C> = channel::Channel<ThreadModeRawMutex, InternalCmd<'a, C>, CMD_CHANNEL_SIZE>;
-type CmdSender<'a, C> = channel::Sender<'a, ThreadModeRawMutex, InternalCmd<'a, C>, CMD_CHANNEL_SIZE>;
-type CmdReceiver<'a, C> = channel::Receiver<'a, ThreadModeRawMutex, InternalCmd<'a, C>, CMD_CHANNEL_SIZE>;
+type CmdSender<'a, C> =
+    channel::Sender<'a, ThreadModeRawMutex, InternalCmd<'a, C>, CMD_CHANNEL_SIZE>;
+type CmdReceiver<'a, C> =
+    channel::Receiver<'a, ThreadModeRawMutex, InternalCmd<'a, C>, CMD_CHANNEL_SIZE>;
 
 enum InternalCmd<'a, C>
 where
@@ -251,7 +252,7 @@ where
 {
     Pub(C::Topic, C::MsgBuf),
     Sub(C::Topic, MsgSender<'a, C>),
-    Unsub(C::Topic),
+    Sync,
 }
 
 pub trait NatsAuthenticator: serde::Serialize + sealed::Sealed {}

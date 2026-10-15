@@ -317,15 +317,24 @@ mod tests {
     fn ping_split() {
         let mut framer = Framer::new();
         let mut provider = Provider::new(&[b"PI", b"NG\r", b"\n"]);
-        assert!(matches!(next_frame(&mut framer, &mut provider), Ok(Frame::Ping)));
+        assert!(matches!(
+            next_frame(&mut framer, &mut provider),
+            Ok(Frame::Ping)
+        ));
     }
 
     #[test]
     fn ok_and_err() {
         let mut framer = Framer::new();
         let mut provider = Provider::new(&[b"+OK\r\n-ERR 'Unknown Protocol Operation'\r\n"]);
-        assert!(matches!(next_frame(&mut framer, &mut provider), Ok(Frame::Ok)));
-        assert!(matches!(next_frame(&mut framer, &mut provider), Ok(Frame::Err)));
+        assert!(matches!(
+            next_frame(&mut framer, &mut provider),
+            Ok(Frame::Ok)
+        ));
+        assert!(matches!(
+            next_frame(&mut framer, &mut provider),
+            Ok(Frame::Err)
+        ));
     }
 
     #[test]

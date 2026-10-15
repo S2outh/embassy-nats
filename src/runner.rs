@@ -78,7 +78,6 @@ pub struct Runner<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> 
     cmd_channel: CmdReceiver<'a, C>,
 
     subs: heapless::Vec<Subscription<'a, C>, N>,
-    sub_sid: usize,
     framer: Framer<C>,
 }
 impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C, A, N> {
@@ -100,7 +99,6 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
             cmd_channel,
 
             subs: heapless::Vec::new(),
-            sub_sid: 0,
             framer: Framer::new(),
         }
     }
@@ -134,8 +132,14 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
 
                 // resubscribe to all existing subscriptions
                 for i in 0..self.subs.len() {
-                    let Subscription { sid, topic, .. } = &self.subs[i];
-                    self.subscribe(*sid, topic.clone()).await?;
+                    let Subscription {
+                        sid,
+                        topic,
+                        channel,
+                    } = &self.subs[i];
+                    if channel.is_open() {
+                        self.subscribe(*sid, topic.clone()).await?;
+                    }
                 }
 
                 // Update state
@@ -146,10 +150,17 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
             }
             Frame::Ok => (),
             Frame::Msg(nats_msg) => {
-                if let Some(Subscription { channel, .. }) =
-                    self.subs.iter().find(|s| s.sid == nats_msg.sid)
+                if let Some((i, Subscription { sid, channel, .. })) = self
+                    .subs
+                    .iter()
+                    .enumerate()
+                    .find(|(_, s)| s.sid == nats_msg.sid)
                 {
-                    channel.send(nats_msg).await;
+                    if channel.send(nats_msg).await.is_err() {
+                        let sid = *sid;
+                        self.subs.swap_remove(i);
+                        self.unsubscribe(sid).await?;
+                    }
                 } else {
                     defmt!(error!(
                         "Receiving message with no endpoint, unsubscribing..."
@@ -210,41 +221,37 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
         Ok(())
     }
     async fn register_sub(&mut self, topic: C::Topic, channel: MsgSender<'a, C>) -> Result<()> {
-        if self
-            .subs
-            .iter_mut()
-            .find(|s| s.topic == topic)
-            .is_some()
-        {
-            defmt!(warn!("can't subscribe to a topic twice"));
-            return Ok(());
+        self.sync()?;
+
+        if self.subs.iter().any(|s| s.topic == topic) {
+            panic!("can't subscribe to a topic twice");
         }
 
-        let sid = self.sub_sid;
-        self.sub_sid += 1;
+        self.subs.sort_unstable_by_key(|s| s.sid);
+
+        let sid = self
+            .subs
+            .iter()
+            .enumerate()
+            .position(|(i, s)| i != s.sid)
+            .unwrap_or(self.subs.len());
 
         self.subs
-            .push(Subscription { sid, topic: topic.clone(), channel})
+            .push(Subscription {
+                sid,
+                topic: topic.clone(),
+                channel,
+            })
             .map_err(|_| CapacityError::Subscriptions)?;
 
         self.subscribe(sid, topic).await?;
 
         Ok(())
     }
-    async fn deregister_sub(&mut self, topic: C::Topic) -> Result<()> {
-        let Some((i, Subscription { sid, .. })) =
-            self.subs.iter().enumerate().find(|(_, s)| s.topic == topic)
-        else {
-            defmt!(warn!(
-                "can't unsubscribe, as no subscription was registered"
-            ));
-            return Ok(());
-        };
-
-        let sid = *sid;
-        self.subs.swap_remove(i);
-        self.unsubscribe(sid).await?;
-
+    // clear unused subs
+    fn sync(&mut self) -> Result<()> {
+        self.subs
+            .retain(|Subscription { channel, .. }| channel.is_open());
         Ok(())
     }
     async fn run_connected(&mut self) {
@@ -254,7 +261,7 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
                 Either::Second(cmd) => match cmd {
                     InternalCmd::Sub(topic, ch) => self.register_sub(topic, ch).await,
                     InternalCmd::Pub(topic, data) => self.publish(topic, data).await,
-                    InternalCmd::Unsub(topic) => self.deregister_sub(topic).await,
+                    InternalCmd::Sync => self.sync(),
                 },
             }
         {
