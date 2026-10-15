@@ -173,6 +173,8 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
         Ok(())
     }
     async fn subscribe(&mut self, sid: usize, topic: C::Topic) -> Result<()> {
+        defmt!(info!("Subscribing {}, topic: {}", sid, topic.as_str()));
+
         self.socket.write_all(b"SUB ").await?;
         self.socket.write_all(topic.as_str().as_bytes()).await?;
         self.socket.write_all(b" ").await?;
@@ -187,6 +189,8 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
         Ok(())
     }
     async fn unsubscribe(&mut self, sid: usize) -> Result<()> {
+        defmt!(info!("Unsubscribing {}", sid));
+
         self.socket.write_all(b"UNSUB ").await?;
         self.socket
             .write_all(
@@ -221,7 +225,7 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
         Ok(())
     }
     async fn register_sub(&mut self, topic: C::Topic, channel: MsgSender<'a, C>) -> Result<()> {
-        self.sync()?;
+        self.sync().await?;
 
         if self.subs.iter().any(|s| s.topic == topic) {
             panic!("can't subscribe to a topic twice");
@@ -249,7 +253,11 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
         Ok(())
     }
     // clear unused subs
-    fn sync(&mut self) -> Result<()> {
+    async fn sync(&mut self) -> Result<()> {
+        let sids: heapless::Vec<_, N> = self.subs.iter().filter(|s| !s.channel.is_open()).map(|v| v.sid).collect();
+        for sid in sids {
+            self.unsubscribe(sid).await?;
+        }
         self.subs
             .retain(|Subscription { channel, .. }| channel.is_open());
         Ok(())
@@ -261,7 +269,7 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
                 Either::Second(cmd) => match cmd {
                     InternalCmd::Sub(topic, ch) => self.register_sub(topic, ch).await,
                     InternalCmd::Pub(topic, data) => self.publish(topic, data).await,
-                    InternalCmd::Sync => self.sync(),
+                    InternalCmd::Sync => self.sync().await,
                 },
             }
         {
