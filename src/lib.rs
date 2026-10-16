@@ -28,7 +28,7 @@ use core::net::SocketAddr;
 
 pub use client::*;
 use embassy_net::tcp::TcpSocket;
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel, watch};
+use embassy_sync::{channel, watch};
 use msg_channel::*;
 pub use msg_channel::{AlreadyOpen, MsgChannel};
 use portable_atomic::AtomicUsize;
@@ -81,6 +81,12 @@ const INFO_MSG_MAX_LEN: usize = "INFO ".len() + 145 + 5 * INFO_METADATA_STR_SIZE
 
 // The size of U32 MAX in decimal is 10 bytes
 const U32_MAX_STR_LEN: usize = 10;
+
+// Mutex type used by all the embassy channels
+#[cfg(not(feature = "critical-section-mutex"))]
+type RawMutex = embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+#[cfg(feature = "critical-section-mutex")]
+type RawMutex = embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Error)]
@@ -235,16 +241,14 @@ pub struct NatsInfoMsg {
     pub proto: i32,
 }
 
-type InfoWatch = watch::Watch<ThreadModeRawMutex, NatsInfoMsg, 0>;
-type InfoSender<'a> = watch::Sender<'a, ThreadModeRawMutex, NatsInfoMsg, 0>;
+type InfoWatch = watch::Watch<RawMutex, NatsInfoMsg, 0>;
+type InfoSender<'a> = watch::Sender<'a, RawMutex, NatsInfoMsg, 0>;
 type InfoReceiver<'a> = watch::DynAnonReceiver<'a, NatsInfoMsg>;
 
 const CMD_CHANNEL_SIZE: usize = 3;
-type CmdChannel<'a, C> = channel::Channel<ThreadModeRawMutex, InternalCmd<'a, C>, CMD_CHANNEL_SIZE>;
-type CmdSender<'a, C> =
-    channel::Sender<'a, ThreadModeRawMutex, InternalCmd<'a, C>, CMD_CHANNEL_SIZE>;
-type CmdReceiver<'a, C> =
-    channel::Receiver<'a, ThreadModeRawMutex, InternalCmd<'a, C>, CMD_CHANNEL_SIZE>;
+type CmdChannel<'a, C> = channel::Channel<RawMutex, InternalCmd<'a, C>, CMD_CHANNEL_SIZE>;
+type CmdSender<'a, C> = channel::Sender<'a, RawMutex, InternalCmd<'a, C>, CMD_CHANNEL_SIZE>;
+type CmdReceiver<'a, C> = channel::Receiver<'a, RawMutex, InternalCmd<'a, C>, CMD_CHANNEL_SIZE>;
 
 enum InternalCmd<'a, C>
 where

@@ -1,13 +1,12 @@
 use core::{future::poll_fn, sync::atomic::Ordering, task::Poll};
 
 use embassy_sync::{
-    blocking_mutex::raw::ThreadModeRawMutex,
     channel::{self, DynamicReceiveFuture, TryReceiveError},
     waitqueue::AtomicWaker,
 };
 use portable_atomic::AtomicU8;
 
-use crate::{NatsCollections, NatsMsg};
+use crate::{NatsCollections, NatsMsg, RawMutex};
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, thiserror::Error)]
@@ -55,7 +54,7 @@ impl AtomicState {
 }
 
 pub struct MsgChannel<C: NatsCollections, const N: usize> {
-    channel: channel::Channel<ThreadModeRawMutex, NatsMsg<C>, N>,
+    channel: channel::Channel<RawMutex, NatsMsg<C>, N>,
     state: AtomicState,
     waker: AtomicWaker,
 }
