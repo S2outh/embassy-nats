@@ -254,7 +254,12 @@ impl<'a, C: NatsCollections, A: NatsAuthenticator, const N: usize> Runner<'a, C,
     }
     // clear unused subs
     async fn sync(&mut self) -> Result<()> {
-        let sids: heapless::Vec<_, N> = self.subs.iter().filter(|s| !s.channel.is_open()).map(|v| v.sid).collect();
+        let sids: heapless::Vec<_, N> = self
+            .subs
+            .iter()
+            .filter(|s| !s.channel.is_open())
+            .map(|v| v.sid)
+            .collect();
         for sid in sids {
             self.unsubscribe(sid).await?;
         }
